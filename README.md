@@ -17,3 +17,9 @@ Web chạy trên máy để tự học, theo dõi tiến trình và quản lý f
 Cả 5 bản dùng chung một lõi (`Core` trong file): công thức XP/level, thanh tiến trình, thông báo lên cấp. Màu và font nằm trong các biến CSS ở đầu file, nên đổi theme sau này chỉ cần sửa một chỗ.
 
 Đây mới là bản demo: dữ liệu là mẫu, chưa lưu lại, chưa mở được file thật. Bản D chỉ đọc tên và dung lượng file trong trình duyệt, không gửi đi đâu.
+
+## Sổ ghi chú riêng (`hub/`)
+
+Trang ghi chú mã hoá đầu cuối, dùng được trên nhiều máy, chạy miễn phí trên Cloudflare. Mỗi lần mở phải nhập mật khẩu chính và mã 6 số; tự khoá sau 30 phút không thao tác. Sau này các tiện ích khác (kể cả phần theo dõi học tập ở trên) sẽ gắn vào đây.
+
+Cách đưa lên mạng và dùng: xem [`hub/README.md`](hub/README.md).

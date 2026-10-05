@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "for-me-hub",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // Mọi request đi qua Worker trước để luôn gắn header bảo mật (CSP...).
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hub-db",
+      // Thay bằng id in ra từ lệnh: npx wrangler d1 create hub-db
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "FILES", "bucket_name": "hub-files" }
+  ],
+  "observability": { "enabled": false }
+}
