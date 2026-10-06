@@ -1,0 +1,1831 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rainbow Rush: Opus vs Sonnet</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}
+canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;background:#000;
+  image-rendering:crisp-edges;image-rendering:pixelated}
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+'use strict';
+const FP = true;   // true: góc nhìn thứ nhất (qua mắt Opus)
+// =====================================================================
+//  RAINBOW RUSH — tôi là Opus 5.5 Max, đua solo với Sonnet 5.5 Max.
+//  Mọi thứ vẽ vào framebuffer 160x90 (chỉ số bảng màu), rồi phóng
+//  nguyên lần lên canvas hiển thị. Không thư viện, không mạng.
+// =====================================================================
+
+const W = 160, H = 90;
+const STEP_MS = 1000 / 60;
+
+// ---------- Canvas logic 160x90 + framebuffer 32-bit ----------
+const off = document.createElement('canvas');
+off.width = W; off.height = H;
+const octx = off.getContext('2d');
+const IMG = octx.createImageData(W, H);
+const FB = new Uint32Array(IMG.data.buffer);
+
+const screenCv = document.getElementById('screen');
+const sctx = screenCv.getContext('2d');
+
+// ---------- Bảng màu cố định (34 màu) ----------
+const HEX = [
+  '#000000', // 0  đen
+  '#06061a', // 1  vũ trụ sâu
+  '#0c1236', // 2  xanh đêm
+  '#16205c', // 3  xanh đậm
+  '#26165a', // 4  tím tối
+  '#3e2a7e', // 5  tím
+  '#6848a8', // 6  tinh vân
+  '#ffffff', // 7  trắng
+  '#8a94c4', // 8  sao mờ
+  '#cd7b5e', // 9  Opus thân
+  '#f4ae8e', // 10 Opus sáng
+  '#8c4634', // 11 Opus bóng
+  '#c9687f', // 12 Sonnet thân
+  '#f2a0b4', // 13 Sonnet sáng
+  '#7e3350', // 14 Sonnet bóng
+  '#ff4040', '#ff9020', '#ffe640', '#40e050', '#40d8e8', '#4070ff', '#a848ff', // 15-21 cầu vồng
+  '#8c1c2c', '#8c4810', '#8c7a18', '#1a7a30', '#1a6c7c', '#1c2e8c', '#541c8c', // 22-28 cầu vồng tối
+  '#2a1f26', // 29 viền đá
+  '#6c5650', // 30 đá
+  '#a08878', // 31 đá sáng
+  '#ff5a1c', // 32 dung nham
+  '#ff40d8'  // 33 magenta
+];
+const C_BLACK = 0, C_WHITE = 7, C_DIM = 8, C_CYAN = 19, C_MAG = 33, C_LAVA = 32, C_YEL = 17;
+const RB = 15, RBD = 22; // cầu vồng sáng / tối: RB + k, RBD + k (k = 0..6)
+
+const PAL = new Uint32Array(HEX.length);
+(function buildPalette() {
+  const b = new Uint8Array(PAL.buffer);
+  for (let i = 0; i < HEX.length; i++) {
+    const h = HEX[i];
+    b[i * 4] = parseInt(h.substr(1, 2), 16);
+    b[i * 4 + 1] = parseInt(h.substr(3, 2), 16);
+    b[i * 4 + 2] = parseInt(h.substr(5, 2), 16);
+    b[i * 4 + 3] = 255;
+  }
+})();
+
+// ---------- Nguyên hàm vẽ (toạ độ nguyên, có cắt biên) ----------
+const fl = Math.floor;
+function px(x, y, c) {
+  if (x >= 0 && x < W && y >= 0 && y < H) FB[y * W + x] = PAL[c];
+}
+function rect(x, y, w, h, c) {
+  let x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+  const x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+  const v = PAL[c];
+  for (let j = y0; j < y1; j++) {
+    const o = j * W;
+    for (let i = x0; i < x1; i++) FB[o + i] = v;
+  }
+}
+function line(x0, y0, x1, y1, c) { // Bresenham
+  let dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    px(x0, y0, c);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+function circle(cx, cy, r, c) { // đường tròn midpoint 1px
+  let x = r, y = 0, d = 1 - r;
+  while (x >= y) {
+    px(cx + x, cy + y, c); px(cx - x, cy + y, c); px(cx + x, cy - y, c); px(cx - x, cy - y, c);
+    px(cx + y, cy + x, c); px(cx - y, cy + x, c); px(cx + y, cy - x, c); px(cx - y, cy - x, c);
+    y++;
+    if (d < 0) d += 2 * y + 1; else { x--; d += 2 * (y - x) + 1; }
+  }
+}
+// Sprite chỉ số màu, 255 = trong suốt
+function makeSprite(w, h) { return { w: w, h: h, d: new Uint8Array(w * h).fill(255) }; }
+function blit(s, x, y) {
+  for (let j = 0; j < s.h; j++) {
+    const yy = y + j;
+    if (yy < 0 || yy >= H) continue;
+    for (let i = 0; i < s.w; i++) {
+      const c = s.d[j * s.w + i];
+      if (c === 255) continue;
+      const xx = x + i;
+      if (xx >= 0 && xx < W) FB[yy * W + xx] = PAL[c];
+    }
+  }
+}
+
+// Ma trận Bayer 4x4 cho dithering
+const BAYER = new Float32Array([0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]);
+for (let i = 0; i < 16; i++) BAYER[i] = (BAYER[i] + 0.5) / 16;
+function bayer(x, y) { return BAYER[(y & 3) * 4 + (x & 3)]; }
+
+// ---------- PRNG xorshift (seed cố định → mỗi vòng lặp y hệt nhau) ----------
+let rngState = 1;
+function rseed(s) { rngState = s >>> 0 || 1; }
+function rnd() {
+  let x = rngState;
+  x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+  rngState = x;
+  return x / 4294967296;
+}
+
+// ---------- Font pixel 3x5 ----------
+const GLYPH_SRC = {
+  A: '010101111101101', B: '110101110101110', C: '011100100100011', D: '110101101101110',
+  E: '111100110100111', F: '111100110100100', G: '011100101101011', H: '101101111101101',
+  I: '111010010010111', K: '101101110101101', L: '100100100100111', M: '101111111101101',
+  N: '110101101101101', O: '010101101101010', P: '110101110100100', R: '110101110101101',
+  S: '011100010001110', T: '111010010010010', U: '101101101101111', V: '101101101101010',
+  W: '101101111111101', X: '101101010101101', Y: '101101010010010', Z: '111001010100111',
+  '0': '111101101101111', '1': '010110010010111', '2': '110001010100111', '3': '110001010001110',
+  '4': '101101111001001', '5': '111100110001110', '6': '011100111101111', '7': '111001010010010',
+  '8': '111101111101111', '9': '111101111001110', '!': '010010010000010', ':': '000010000010000',
+  '-': '000000111000000', '<': '001010100010001', '>': '100010001010100'
+};
+const GLYPH = new Uint8Array(128 * 5);
+const GLYPH_W = new Uint8Array(128).fill(3);
+(function buildFont() {
+  for (const k in GLYPH_SRC) {
+    const code = k.charCodeAt(0), s = GLYPH_SRC[k];
+    for (let r = 0; r < 5; r++) {
+      let bits = 0;
+      for (let c = 0; c < 3; c++) if (s[r * 3 + c] === '1') bits |= 4 >> c;
+      GLYPH[code * 5 + r] = bits;
+    }
+  }
+  GLYPH[46 * 5 + 4] = 4; GLYPH_W[46] = 1; // '.'
+  GLYPH_W[32] = 2;                         // ' '
+})();
+function textWidth(s) {
+  let w = 0;
+  for (let i = 0; i < s.length; i++) w += GLYPH_W[s.charCodeAt(i)] + 1;
+  return w > 0 ? w - 1 : 0;
+}
+function glyphs(s, x, y, c, rainbowT) {
+  let cx = x;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    const col = rainbowT >= 0 ? RB + ((i + rainbowT) % 7) : c;
+    for (let r = 0; r < 5; r++) {
+      const bits = GLYPH[code * 5 + r];
+      if (!bits) continue;
+      if (bits & 4) px(cx, y + r, col);
+      if (bits & 2) px(cx + 1, y + r, col);
+      if (bits & 1) px(cx + 2, y + r, col);
+    }
+    cx += GLYPH_W[code] + 1;
+  }
+}
+// Chữ có viền 1px để luôn đọc được trên nền hỗn loạn
+function text(s, x, y, c, oc, rainbowT) {
+  if (oc >= 0) {
+    glyphs(s, x - 1, y, oc, -1); glyphs(s, x + 1, y, oc, -1);
+    glyphs(s, x, y - 1, oc, -1); glyphs(s, x, y + 1, oc, -1);
+    glyphs(s, x - 1, y - 1, oc, -1); glyphs(s, x + 1, y + 1, oc, -1);
+    glyphs(s, x + 1, y - 1, oc, -1); glyphs(s, x - 1, y + 1, oc, -1);
+  }
+  glyphs(s, x, y, c, rainbowT === undefined ? -1 : rainbowT);
+}
+
+// ---------- Mẫu rung cố định (không ngẫu nhiên) ----------
+const SHAKE_X = new Int8Array([1, -1, 2, -2, 1, 0, -1, 2, -1, 1, 0, -2, 1, -1, 0, 1]);
+const SHAKE_Y = new Int8Array([-1, 1, 0, 1, -2, 1, 0, -1, 1, -1, 2, 0, -1, 0, 1, -1]);
+// Rung đầu chùm tia
+const WOBBLE = new Int8Array([0, 1, 1, 0, -1, -1, 0, 1, 0, -1, 1, 0, -1, 0]);
+
+function smooth01(u) { u = u < 0 ? 0 : u > 1 ? 1 : u; return u * u * (3 - 2 * u); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+// =====================================================================
+//  Dòng thời gian, tốc độ, sàn cầu vồng
+// =====================================================================
+const LOOP = 1640;          // 1 vòng ≈ 27 giây (tính theo bước mô phỏng 60Hz)
+const T_BOOST = 1320, T_FINISH = 1500, T_WARP = 1600;
+const BASE_X = 52;          // tôi chạy ở ~1/3 bên trái màn hình
+const FLOOR_BASE = 64;
+const NOFLOOR = 9999;
+const ROADW = 24;           // nửa bề rộng đường (đơn vị ngang, góc nhìn thứ nhất)
+const CRUISE = 3.6, BOOSTV = 6.6;
+
+function speedAt(t) {
+  if (t < 60) return 5.2 + (CRUISE - 5.2) * smooth01(t / 60);
+  if (t < T_BOOST) return CRUISE + 0.22 * Math.sin(t * 0.011);
+  if (t < T_FINISH) return CRUISE + (BOOSTV - CRUISE) * smooth01((t - T_BOOST) / 70);
+  if (t < T_WARP) return BOOSTV + (5.2 - BOOSTV) * smooth01((t - T_FINISH) / 100);
+  return 5.2 + 4.5 * smooth01((t - T_WARP) / (LOOP - T_WARP));
+}
+// Quãng đường cuộn đã tính sẵn cho cả vòng → mọi thứ tất định
+const CAMX = new Float64Array(LOOP + 2);
+for (let t = 0; t <= LOOP; t++) CAMX[t + 1] = CAMX[t] + speedAt(t);
+function camXAt(t) { return CAMX[clamp(t, 0, LOOP + 1)]; }
+
+// Khoảng cách của Sonnet so với tôi (px, dương = Sonnet dẫn trước)
+const REL_T = new Int16Array([0, 110, 250, 380, 470, 610, 720, 880, 960, 1064, 1112, 1170, 1250, 1350, 1430, 1478, 1500, 1570, 1640]);
+const REL_V = new Float32Array([-14, -14, 20, 22, 9, 22, 16, 5, 22, 20, -5, 24, 12, 24, 12, 3, -7, -24, -14]);
+function relAt(t) {
+  if (t <= REL_T[0]) return REL_V[0];
+  for (let i = 1; i < REL_T.length; i++) {
+    if (t <= REL_T[i]) {
+      const u = (t - REL_T[i - 1]) / (REL_T[i] - REL_T[i - 1]);
+      return REL_V[i - 1] + (REL_V[i] - REL_V[i - 1]) * smooth01(u);
+    }
+  }
+  return REL_V[REL_V.length - 1];
+}
+
+// ---------- Địa hình: bệ nhảy & khe hở (đặt theo thời điểm tôi tới) ----------
+const gapS = new Float64Array(4), gapE = new Float64Array(4);
+const rampS = new Float64Array(4), rampE = new Float64Array(4);
+let nGap = 0, nRamp = 0, finishWX = 0;
+function wxAtOpus(t) { return CAMX[t] + BASE_X + 12; }
+function addRamp(t, len) { rampS[nRamp] = wxAtOpus(t); rampE[nRamp] = rampS[nRamp] + len; nRamp++; return rampE[nRamp - 1]; }
+function addGap(wx, len) { gapS[nGap] = wx; gapE[nGap] = wx + len; nGap++; }
+(function buildTerrain() {
+  addGap(addRamp(540, 40), 64);   // bệ nhảy + khe
+  addGap(wxAtOpus(1206), 76);     // khe hở sau thiên thạch lớn
+  addGap(addRamp(1405, 48), 96);  // bệ nhảy lúc BOOST
+  finishWX = CAMX[T_FINISH] + BASE_X - 7 + 12;
+})();
+
+function floorWave(wx) { return 2.2 * Math.sin(wx * 0.0113) + 1.2 * Math.sin(wx * 0.029 + 1.7); }
+function floorTop(wx) {
+  for (let i = 0; i < nGap; i++) if (wx >= gapS[i] && wx < gapE[i]) return NOFLOOR;
+  let y = FLOOR_BASE + Math.round(floorWave(wx));
+  for (let i = 0; i < nRamp; i++) {
+    if (wx >= rampS[i] && wx < rampE[i]) {
+      const u = (wx - rampS[i]) / (rampE[i] - rampS[i]);
+      y -= Math.round(11 * u * u);
+    }
+  }
+  return y;
+}
+function rampIndex(wx) {
+  for (let i = 0; i < nRamp; i++) if (wx >= rampS[i] && wx < rampE[i]) return i;
+  return -1;
+}
+
+// =====================================================================
+//  Nền vũ trụ: dải dần dithering, tinh vân, hành tinh, sao
+// =====================================================================
+const BGH = 106;
+const BG32 = new Uint32Array(W * BGH);
+(function buildBackground() {
+  const GR = [0, 1, 2, 3, 4];
+  for (let y = 0; y < BGH; y++) {
+    const g = Math.pow(y / (BGH - 1), 1.15) * (GR.length - 1);
+    for (let x = 0; x < W; x++) {
+      const base = fl(g), f = g - base;
+      const c = f > bayer(x, y) ? GR[Math.min(base + 1, GR.length - 1)] : GR[base];
+      BG32[y * W + x] = PAL[c];
+    }
+  }
+})();
+
+const NEB = makeSprite(96, 40);
+(function buildNebula() {
+  for (let y = 0; y < NEB.h; y++) for (let x = 0; x < NEB.w; x++) {
+    const a = Math.exp(-(((x - 30) / 26) ** 2 + ((y - 20) / 11) ** 2));
+    const b = Math.exp(-(((x - 62) / 22) ** 2 + ((y - 16) / 9) ** 2)) * 0.8;
+    const c = Math.exp(-(((x - 48) / 40) ** 2 + ((y - 24) / 14) ** 2)) * 0.45;
+    let d = a + b + c + 0.12 * Math.sin(x * 0.35 + y * 0.6) * Math.sin(y * 0.4 - x * 0.12);
+    d += (bayer(x, y) - 0.5) * 0.2;
+    NEB.d[y * NEB.w + x] = d > 0.82 ? 6 : d > 0.55 ? 5 : d > 0.3 ? 4 : 255;
+  }
+})();
+
+const PLANET = makeSprite(48, 36);
+(function buildPlanet() {
+  const R = 14, cx = 24, cy = 18;
+  const PL = [1, 2, 3, 5, 6];
+  const L0 = -0.55, L1 = -0.5, L2 = 0.67;
+  for (let y = 0; y < PLANET.h; y++) for (let x = 0; x < PLANET.w; x++) {
+    const dx = (x - cx) / R, dy = (y - cy) / R, rr = dx * dx + dy * dy;
+    if (rr > 1) continue;
+    const dz = Math.sqrt(1 - rr);
+    let s = 0.15 + 0.85 * Math.max(0, dx * L0 + dy * L1 + dz * L2);
+    s += 0.09 * Math.sin(y * 0.95 + Math.sin(x * 0.2));
+    s = clamp(s, 0, 0.999) * (PL.length - 1);
+    const b = fl(s);
+    PLANET.d[y * PLANET.w + x] = (s - b) > bayer(x, y) ? PL[Math.min(b + 1, PL.length - 1)] : PL[b];
+  }
+  // vành đai: nửa sau bị hành tinh che, nửa trước vẽ đè lên
+  for (let k = 0; k < 720; k++) {
+    const th = k / 720 * Math.PI * 2;
+    for (let a = 21; a <= 22; a++) {
+      const x = Math.round(cx + a * Math.cos(th)), y = Math.round(cy + 0.2 * a * Math.sin(th) - 0.12 * a * Math.cos(th));
+      if (x < 0 || y < 0 || x >= PLANET.w || y >= PLANET.h) continue;
+      const i = y * PLANET.w + x;
+      const front = Math.sin(th) > 0;
+      if (front) PLANET.d[i] = a === 21 ? C_DIM : 5;
+      else if (PLANET.d[i] === 255) PLANET.d[i] = 5;
+    }
+  }
+})();
+const MOON = makeSprite(9, 9);
+(function buildMoon() {
+  for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) {
+    const dx = (x - 4) / 4, dy = (y - 4) / 4, rr = dx * dx + dy * dy;
+    if (rr > 1.05) continue;
+    const s = 0.2 + 0.8 * Math.max(0, -dx * 0.6 - dy * 0.5 + Math.sqrt(Math.max(0, 1 - rr)) * 0.6);
+    MOON.d[y * 9 + x] = s > 0.7 ? C_DIM : s > 0.4 + (bayer(x, y) - 0.5) * 0.3 ? 3 : 2;
+  }
+})();
+
+// Sao xa / sao trung cảnh / đường tốc độ cận cảnh
+const NFAR = 48, NMID = 22, NSL = 20;
+const farX = new Uint8Array(NFAR), farY = new Uint8Array(NFAR), farP = new Uint8Array(NFAR);
+const midX = new Float32Array(NMID), midY = new Uint8Array(NMID);
+const slX = new Float32Array(NSL), slY = new Uint8Array(NSL), slL = new Uint8Array(NSL);
+(function buildStars() {
+  rseed(777);
+  for (let i = 0; i < NFAR; i++) { farX[i] = fl(rnd() * W); farY[i] = fl(rnd() * 70); farP[i] = fl(rnd() * 255); }
+  for (let i = 0; i < NMID; i++) { midX[i] = rnd() * W; midY[i] = 2 + fl(rnd() * 84); }
+})();
+function respawnSpeedLine(i, x) {
+  slX[i] = x;
+  slY[i] = rnd() < 0.55 ? 3 + fl(rnd() * 32) : 74 + fl(rnd() * 14);
+  slL[i] = 6 + fl(rnd() * 16);
+}
+
+// =====================================================================
+//  Hệ thống particle kiểu pool — không cấp phát trong vòng lặp
+// =====================================================================
+const NP = 700;
+const pX = new Float32Array(NP), pY = new Float32Array(NP), pVX = new Float32Array(NP), pVY = new Float32Array(NP);
+const pG = new Float32Array(NP), pLife = new Int16Array(NP), pMax = new Int16Array(NP);
+const pRamp = new Uint8Array(NP), pWorld = new Uint8Array(NP), pSize = new Uint8Array(NP);
+const pL = new Float32Array(NP), pVL = new Float32Array(NP);   // toạ độ ngang (chiều sâu màn hình ở góc nhìn ngang)
+let pNext = 0, pLatBase = 0, pLatJit = 0, pLatV = 0;
+
+// Bảng chuyển màu theo loại (dãy chỉ số bảng màu)
+const RAMPS = [];
+const R_SPARK = RAMPS.push(new Uint8Array([7, 17, 17, 16, 32, 22, 29])) - 1;
+const R_TAIL = RAMPS.push(new Uint8Array([7, 17, 32, 16, 15, 22, 29, 4])) - 1;
+const R_DEBRIS = RAMPS.push(new Uint8Array([31, 31, 30, 30, 29, 29])) - 1;
+const R_BEAM = RAMPS.push(new Uint8Array([7, 19, 19, 33, 26, 28])) - 1;
+const R_RAIN = RAMPS.length;      // tia lửa cầu vồng: trắng → màu → tối
+for (let k = 0; k < 7; k++) RAMPS.push(new Uint8Array([7, RB + k, RB + k, RBD + k, RBD + k]));
+const R_DROP = RAMPS.length;      // hạt sáng rơi từ sàn: màu → tối → tím tối
+for (let k = 0; k < 7; k++) RAMPS.push(new Uint8Array([RB + k, RB + k, RBD + k, RBD + k, 4]));
+
+function spawnP(ramp, world, x, y, vx, vy, g, life, size) {
+  let i = pNext;
+  for (let n = 0; n < NP; n++) {
+    if (pLife[i] <= 0) break;
+    i = (i + 1) % NP;
+  }
+  pNext = (i + 1) % NP;
+  pX[i] = x; pY[i] = y; pVX[i] = vx; pVY[i] = vy; pG[i] = g;
+  pLife[i] = life; pMax[i] = life; pRamp[i] = ramp; pWorld[i] = world; pSize[i] = size;
+  pL[i] = pLatBase + (pLatJit ? (rnd() - 0.5) * pLatJit : 0);
+  pVL[i] = pLatV + (pLatJit ? (rnd() - 0.5) * pLatJit * 0.04 : 0);
+}
+function updateParticles() {
+  for (let i = 0; i < NP; i++) {
+    if (pLife[i] <= 0) continue;
+    pX[i] += pVX[i]; pY[i] += pVY[i]; pVY[i] += pG[i]; pL[i] += pVL[i];
+    pLife[i]--;
+  }
+}
+function drawParticles(camXi, camYi, shX, shY) {
+  for (let i = 0; i < NP; i++) {
+    if (pLife[i] <= 0) continue;
+    const r = RAMPS[pRamp[i]];
+    const age = pMax[i] - pLife[i];
+    const c = r[fl(age * r.length / pMax[i])];
+    const x = fl(pX[i]) - (pWorld[i] ? camXi : 0) + shX;
+    const y = fl(pY[i]) - camYi + shY;
+    if (pSize[i] > 1) rect(x, y, pSize[i], pSize[i], c); else px(x, y, c);
+  }
+}
+function clearParticles() { for (let i = 0; i < NP; i++) pLife[i] = 0; }
+
+// Tia lửa cầu vồng bung ra (tiếp đất, trượt, dash)
+function rainbowBurst(world, x, y, n, spread, upward) {
+  for (let j = 0; j < n; j++) {
+    const k = fl(rnd() * 7);
+    spawnP(R_RAIN + k, world, x + (rnd() - 0.5) * spread, y,
+      (rnd() - 0.5) * 2.2 - 0.6, -rnd() * upward - 0.3, 0.09, 14 + fl(rnd() * 12), 1);
+  }
+}
+
+// ---------- Vòng tròn cầu vồng (nhảy kép) ----------
+const NRING = 6;
+const ringMe = new Uint8Array(NRING);
+const ringX = new Float32Array(NRING), ringY = new Float32Array(NRING), ringAge = new Int16Array(NRING).fill(-1);
+function spawnRing(x, y, me) {
+  let best = 0;
+  for (let i = 0; i < NRING; i++) if (ringAge[i] < 0) { best = i; break; }
+  ringX[best] = x; ringY[best] = y; ringAge[best] = 0; ringMe[best] = me ? 1 : 0;
+}
+function updateRings() { for (let i = 0; i < NRING; i++) if (ringAge[i] >= 0 && ++ringAge[i] > 20) ringAge[i] = -1; }
+function drawRings(camYi, shX, shY) {
+  for (let i = 0; i < NRING; i++) {
+    const a = ringAge[i];
+    if (a < 0) continue;
+    const r = 3 + fl(a * 0.9);
+    const x = fl(ringX[i]) + shX, y = fl(ringY[i]) - camYi + shY;
+    const k = a % 7;
+    circle(x, y, r, a < 12 ? RB + k : RBD + k);
+    if (r > 4) circle(x, y, r - 2, a < 9 ? RB + ((k + 3) % 7) : RBD + ((k + 3) % 7));
+  }
+}
+
+// =====================================================================
+//  Trạng thái mô phỏng chung
+// =====================================================================
+let T = 0;            // bước trong vòng lặp (chỉ tăng khi thế giới cập nhật)
+let camX = 0;         // quãng đường cuộn
+let spd = CRUISE;     // tốc độ hiện tại (px / bước)
+let lead = 0;         // camera dự đoán: đẩy tôi sang trái khi tăng tốc
+// Bộ đếm kiểm tra (dùng cho test tự động, không cấp phát)
+const DBG = { hits: 0, near: 0, falls: 0, edgeFalls: 0, nearGap: new Float32Array(64), nNear: 0 };
+
+// =====================================================================
+//  Nhân vật pixel 12x8 + pose tham số hoá
+// =====================================================================
+const MW = 24, MH = 20, MFY = 17;   // mask: cột 6 = cột 0 của khung 12x8, hàng MFY = đáy chân
+const EMPTY = 255;
+const A_JUMP = 1, A_DJUMP = 2, A_SLIDE = 3, A_DASH = 4;
+const GRAV = 0.16, JUMP_V = 2.65, DJUMP_V = 2.35;
+
+function makeRacer(name, me, cB, cH, cS) {
+  return {
+    name: name, me: me, cB: cB, cH: cH, cS: cS,
+    sx: BASE_X, dashOff: 0, dashT: 0, airDash: false,
+    y: FLOOR_BASE, vy: 0, grounded: true, jumps: 0,
+    preJ: 0, jumpV: JUMP_V, takeT: 0, landT: 0, hover: 0, slideT: 0,
+    legAcc: 0, legF: 0,
+    pLean: 0, pSX: 0, pSY: 0, pArm: 0, pEye: 0,
+    qBob: 0, qLean: 0, qSX: 0, qSY: 0, qArm: 0, qEye: 0, qTuck: 0, qSlide: 0,
+    forceQ: true, lookAhead: 0,
+    flashT: 0, flashDX: 0, flashDY: 0,
+    schT: new Int16Array(12), schA: new Uint8Array(12), schP: new Int16Array(12), nSch: 0,
+    mask: new Uint8Array(MW * MH).fill(EMPTY), mx0: 0, mx1: 0, my0: 0, my1: 0,
+    ghostLeft: 0, ghostIdx: 0, ghostTimer: 0,
+    bx0: 0, by0: 0, bx1: 0, by1: 0, wx: 0,
+    labelLift: 0, lane: 0, eyeRow: 11, lw: 0
+  };
+}
+const OPUS = makeRacer('OPUS 5.5 MAX', true, 9, 10, 11);
+const SONNET = makeRacer('SONNET 5.5 MAX', false, 12, 13, 14);
+OPUS.lane = -6; SONNET.lane = 7;   // làn ngang: Sonnet chạy lệch bên phải
+const RACERS = [SONNET, OPUS]; // vẽ Sonnet trước, tôi ở lớp trên
+
+function resetRacer(r, base) {
+  r.sx = base; r.dashOff = 0; r.dashT = 0; r.airDash = false;
+  r.vy = 0; r.grounded = true; r.jumps = 0; r.preJ = 0; r.takeT = 0; r.landT = 0; r.hover = 0; r.slideT = 0;
+  r.nSch = 0; r.flashT = 0; r.lookAhead = 0; r.ghostLeft = 0; r.forceQ = true;
+  r.wx = camX + base + 6;
+  const ft = floorTop(r.wx);
+  r.y = ft === NOFLOOR ? FLOOR_BASE : ft;
+}
+
+// ---------- Lịch hành động (tránh né được phân bổ trước) ----------
+function schedule(r, t, a, p) {
+  if (r.nSch >= r.schT.length) return;
+  r.schT[r.nSch] = t; r.schA[r.nSch] = a; r.schP[r.nSch] = p; r.nSch++;
+}
+function runSchedule(r) {
+  for (let i = 0; i < r.nSch; i++) {
+    if (r.schT[i] === T) {
+      const a = r.schA[i], p = r.schP[i];
+      r.nSch--;
+      r.schT[i] = r.schT[r.nSch]; r.schA[i] = r.schA[r.nSch]; r.schP[i] = r.schP[r.nSch];
+      i--;
+      doAction(r, a, p);
+    }
+  }
+}
+function doAction(r, a, p) {
+  if (r.me) onMyAction();
+  if (a === A_JUMP) {
+    if (r.grounded && r.preJ === 0) { r.preJ = 3; r.jumpV = p > 0 ? p / 100 : JUMP_V; r.slideT = 0; r.forceQ = true; }
+    else if (!r.grounded) doAction(r, A_DJUMP, 0);
+  } else if (a === A_DJUMP) {
+    if (!r.grounded && r.jumps < 2 && r.hover === 0) { r.hover = 5; r.jumps = 2; r.forceQ = true; }
+  } else if (a === A_SLIDE) {
+    if (r.grounded) { r.slideT = p; r.forceQ = true; }
+  } else if (a === A_DASH) {
+    r.dashT = 6; r.ghostLeft = 4; r.ghostIdx = 0; r.ghostTimer = 0; r.airDash = !r.grounded; r.forceQ = true;
+    if (r.airDash) r.vy = 0;
+  }
+}
+
+// ---------- Vật lý + AI tự động cho địa hình ----------
+function updateRacer(r, base) {
+  // ngang: né nhanh (dash) rồi trôi dần về chỗ cũ
+  if (r.dashT > 0) {
+    r.dashOff += 3.6;
+    if (--r.dashT === 0) { r.airDash = false; r.forceQ = true; }
+  } else r.dashOff *= 0.965;
+  r.sx = base + r.dashOff;
+  const cx = r.sx + 6;
+  r.wx = fl(camX) + fl(cx);
+  const scr = FP && r.me;   // góc nhìn thứ nhất: hiệu ứng của chính tôi vẽ theo màn hình
+  pLatBase = r.lane; pLatJit = 10; pLatV = 0;
+
+  // dọc
+  if (r.preJ > 0 && --r.preJ === 0) {
+    r.vy = -r.jumpV; r.grounded = false; r.jumps = 1; r.takeT = 5; r.forceQ = true;
+    if (scr) meFx(FX_TAKEOFF); else rainbowBurst(1, r.wx, r.y - 1, 6, 8, 1.0);
+  }
+  if (!r.grounded) {
+    if (r.hover > 0) {
+      r.vy = 0;
+      if (--r.hover === 0) {
+        r.vy = -DJUMP_V; r.forceQ = true;
+        spawnRing(cx, r.y - 4, r.me);
+        if (scr) meFx(FX_DJUMP); else rainbowBurst(1, r.wx, r.y, 8, 6, 0.4);
+      }
+    } else if (r.airDash) r.vy = 0;
+    else r.vy += GRAV;
+    const prevY = r.y;
+    r.y += r.vy;
+    const ft = floorTop(r.wx);
+    if (ft !== NOFLOOR && r.vy >= 0 && r.y >= ft && prevY <= ft + 2) {
+      r.y = ft; r.vy = 0; r.grounded = true; r.jumps = 0; r.landT = 7; r.forceQ = true;
+      if (scr) meFx(FX_LAND); else rainbowBurst(1, r.wx, ft - 1, 14, 10, 1.7);   // tiếp đất: phun tia lửa cầu vồng
+    }
+    // AI: đang rơi mà phía dưới vẫn là khe → nhảy kép
+    if (!r.grounded && r.jumps === 1 && r.hover === 0 && r.vy > 0.6 &&
+        floorTop(r.wx) === NOFLOOR && floorTop(r.wx + spd * 9) === NOFLOOR) doAction(r, A_DJUMP, 0);
+    if (r.y > H + 60) { DBG.falls++; resetRacer(r, base); }
+  } else {
+    const ft = floorTop(r.wx);
+    if (ft === NOFLOOR) { r.grounded = false; r.jumps = 1; DBG.edgeFalls++; }
+    else {
+      const ri = rampIndex(r.wx);
+      if (ri >= 0 && r.wx + spd >= rampE[ri]) {        // mép bệ nhảy → bật lên
+        r.y = ft; r.vy = -3.15; r.grounded = false; r.jumps = 1; r.takeT = 6; r.slideT = 0; r.forceQ = true;
+        if (scr) meFx(FX_TAKEOFF); else rainbowBurst(1, r.wx, ft - 1, 10, 6, 1.4);
+      } else {
+        r.y = ft;
+        if (r.preJ === 0 && ri < 0 && floorTop(r.wx + spd * 6) === NOFLOOR) {
+          r.preJ = 2; r.jumpV = JUMP_V; r.slideT = 0; r.forceQ = true;
+          if (r.me) onMyAction();
+        }
+      }
+    }
+    if (r.slideT > 0) {
+      if (--r.slideT === 0) r.forceQ = true;
+      // trượt: tia lửa từ mặt tiếp xúc sàn
+      if (scr) meFx(FX_SLIDE);
+      else {
+        spawnP(R_SPARK, 1, r.wx - 3 + rnd() * 6, r.y - 1, -0.4 - rnd() * 1.4, -0.3 - rnd() * 1.1, 0.07, 10 + fl(rnd() * 8), 1);
+        if ((T & 1) === 0) spawnP(R_RAIN + fl(rnd() * 7), 1, r.wx + 2, r.y - 1, -rnd() * 1.2, -rnd() * 1.4, 0.08, 12, 1);
+      }
+    }
+  }
+  if (r.landT > 0) r.landT--;
+  if (r.takeT > 0) r.takeT--;
+
+  // dash: tia lửa + bóng tàn cầu vồng
+  if (r.dashT > 0) {
+    if (scr) meFx(FX_DASH);
+    else {
+      spawnP(R_SPARK, 1, r.wx - 6, r.y - 2 - rnd() * 5, -1 - rnd() * 1.5, (rnd() - 0.5) * 0.8, 0.02, 10 + fl(rnd() * 6), 1);
+      if (r.grounded) spawnP(R_RAIN + fl(rnd() * 7), 1, r.wx - 4, r.y - 1, -rnd() * 1.5, -rnd(), 0.08, 12, 1);
+    }
+  }
+  if (r.ghostLeft > 0 && --r.ghostTimer <= 0) {
+    spawnGhost(r); r.ghostLeft--; r.ghostTimer = 2;
+  }
+  if (r.flashT > 0) r.flashT--;
+  if (r.lookAhead > 0) r.lookAhead--;
+
+  // chu kỳ chạy 4 frame, nhanh dần theo tốc độ
+  if (r.grounded && r.slideT === 0) {
+    r.legAcc += spd * 0.085;
+    while (r.legAcc >= 1) { r.legAcc -= 1; r.legF = (r.legF + 1) & 3; }
+  }
+  updatePose(r);
+  buildMask(r);
+  r.bx0 = fl(r.sx) - 6 + r.mx0; r.bx1 = fl(r.sx) - 6 + r.mx1;
+  r.by0 = fl(r.y) - 1 - MFY + r.my0; r.by1 = fl(r.y) - 1 - MFY + r.my1;
+}
+
+// ---------- Pose: nội suy mượt, lượng tử hoá ~12fps ----------
+function updatePose(r) {
+  let lean = 0, sxp = 0, syp = 0, arm = 0, tuck = 0, slide = 0;
+  const lifted = (r.legF & 1) === 0;
+  if (r.grounded) {
+    if (r.preJ > 0) { syp = -2; sxp = 1; arm = 1; }                          // tích lực
+    else if (r.slideT > 0) { syp = -4; sxp = 2; lean = 1; arm = -1; slide = 1; }
+    else if (r.dashT > 0) { syp = -1; sxp = 2; lean = 1; arm = 1; }
+    else if (r.landT > 0) { syp = r.landT > 3 ? -2 : -1; sxp = r.landT > 3 ? 2 : 1; arm = 1; }
+    else { lean = spd > 5 ? 1 : 0; arm = lifted ? 1 : 0; }
+  } else {
+    if (r.airDash) { syp = -1; sxp = 2; lean = 1; arm = 1; }
+    else if (r.takeT > 0) { syp = 2; sxp = -1; arm = -1; }                   // bật nhảy: kéo giãn
+    else if (r.hover > 0) { syp = -1; sxp = 1; arm = -1; tuck = 1; }           // khựng trên không
+    else if (r.vy < -0.8) { syp = 1; arm = -1; }
+    else if (r.vy <= 0.8) { syp = -1; tuck = 1; }                              // co lại ở đỉnh
+    else { arm = -1; }
+  }
+  const k = r.forceQ ? 0.7 : 0.5;
+  r.pLean += (lean - r.pLean) * k; r.pSX += (sxp - r.pSX) * k; r.pSY += (syp - r.pSY) * k;
+  r.pArm += (arm - r.pArm) * k; r.pEye += ((r.lookAhead > 0 ? 1 : 0) - r.pEye) * k;
+  if (r.forceQ || T % 5 === 0) {   // chỉ đổi hình ~12 lần/giây
+    r.qLean = Math.round(r.pLean); r.qSX = Math.round(r.pSX); r.qSY = Math.round(r.pSY);
+    r.qArm = Math.round(r.pArm); r.qEye = Math.round(r.pEye); r.qTuck = tuck; r.qSlide = slide;
+    r.forceQ = false;
+  }
+  r.qBob = r.grounded && r.slideT === 0 && r.preJ === 0 && r.landT === 0 && r.dashT === 0 && lifted ? -1 : 0;
+}
+
+function mset(m, i, j, c) { if (i >= 0 && i < MW && j >= 0 && j < MH) m[j * MW + i] = c; }
+function buildMask(r) {
+  const m = r.mask;
+  m.fill(EMPTY);
+  const lean = FP ? 0 : r.qLean;   // nhìn từ phía sau thì không nghiêng ngang
+  const legH = r.qSlide ? 0 : r.qTuck ? 1 : 2;
+  let bodyH = 8 + r.qSY - legH;
+  if (bodyH < 3) bodyH = 3;
+  const bodyW = 8 + r.qSX;
+  const bottom = MFY - legH + r.qBob;
+  const top = bottom - bodyH + 1;
+  const left = 12 - (bodyW >> 1), right = left + bodyW - 1;
+  const cB = r.cB, cH = r.cH, cS = r.cS;
+  // thân + highlight trên/trái + bóng dưới/phải
+  for (let j = top; j <= bottom; j++) {
+    const sh = j - top < 2 ? lean : 0;
+    for (let i = left; i <= right; i++) {
+      let c = cB;
+      if (j === top) c = cH;
+      else if (j === bottom) c = cS;
+      else if (i === left) c = cH;
+      else if (i === right) c = cS;
+      mset(m, i + sh, j, c);
+    }
+  }
+  // tay 2x2 hai bên
+  let ar = top + Math.round(bodyH * 0.34) + r.qArm;
+  if (ar < top) ar = top;
+  if (ar > bottom - 1) ar = bottom - 1;
+  for (let a = 0; a < 2; a++) {
+    const j = ar + a, sh = j - top < 2 ? lean : 0;
+    mset(m, left - 2 + sh, j, a === 0 ? cH : cH); mset(m, left - 1 + sh, j, a === 0 ? cH : cS);
+    mset(m, right + 1 + sh, j, a === 0 ? cH : cB); mset(m, right + 2 + sh, j, a === 0 ? cH : cS);
+  }
+  // 4 chân (cột 2·4·7·9), nâng hạ luân phiên 2 cái một
+  if (legH > 0) {
+    for (let L = 0; L < 4; L++) {
+      const col = left + (L === 0 ? 0 : L === 1 ? 2 : L === 2 ? bodyW - 3 : bodyW - 1);
+      let len;
+      if (r.qTuck || !r.grounded) len = legH;
+      else {
+        const up = (r.legF === 0 && (L === 0 || L === 2)) || (r.legF === 2 && (L === 1 || L === 3));
+        len = up ? 1 : MFY - bottom;
+      }
+      for (let k = 1; k <= len; k++) mset(m, col, bottom + k, k === len ? cS : cB);
+    }
+  }
+  // mắt đen 1x1 (nhìn trước 1px khi cảnh báo)
+  const er = bodyH >= 4 ? top + 1 : top, esh = er - top < 2 ? lean : 0;
+  r.eyeRow = er;
+  mset(m, left + 1 + r.qEye + esh, er, C_BLACK);
+  mset(m, right - 1 + r.qEye + esh, er, C_BLACK);
+  // phạm vi mask → khung va chạm
+  let x0 = MW, x1 = -1, y0 = MH, y1 = -1;
+  for (let j = 0; j < MH; j++) for (let i = 0; i < MW; i++) {
+    if (m[j * MW + i] === EMPTY) continue;
+    if (i < x0) x0 = i; if (i > x1) x1 = i; if (j < y0) y0 = j; if (j > y1) y1 = j;
+  }
+  r.mx0 = x0; r.mx1 = x1; r.my0 = y0; r.my1 = y1;
+}
+
+function maskFilled(m, i, j) { return i >= 0 && i < MW && j >= 0 && j < MH && m[j * MW + i] !== EMPTY; }
+function drawRacer(r, camYi, shX, shY) {
+  const ox = fl(r.sx) - 6 + shX, oy = fl(r.y) - 1 - MFY - camYi + shY;
+  const m = r.mask;
+  const flashOn = r.flashT > 0 && (r.flashT > 6 || (r.flashT & 1) === 0);
+  // viền 1px: đen để tách khỏi nền; phía gần nguy hiểm loé trắng khi near miss
+  for (let j = 0; j <= MFY; j++) for (let i = 0; i < MW; i++) {
+    if (m[j * MW + i] !== EMPTY) continue;
+    if (!(maskFilled(m, i - 1, j) || maskFilled(m, i + 1, j) || maskFilled(m, i, j - 1) || maskFilled(m, i, j + 1))) continue;
+    let c = C_BLACK;
+    if (flashOn && (i - 12) * r.flashDX + (j - (MFY - 5)) * r.flashDY > 0) c = C_WHITE;
+    px(ox + i, oy + j, c);
+  }
+  for (let j = 0; j < MH; j++) for (let i = 0; i < MW; i++) {
+    const v = m[j * MW + i];
+    if (v !== EMPTY) px(ox + i, oy + j, v);
+  }
+}
+
+// ---------- Hiệu ứng của chính tôi ở góc nhìn thứ nhất (toạ độ màn hình) ----------
+const FX_TAKEOFF = 0, FX_LAND = 1, FX_DJUMP = 2, FX_SLIDE = 3, FX_DASH = 4;
+function meFx(kind) {
+  pLatBase = 0; pLatJit = 0; pLatV = 0;
+  if (kind === FX_LAND) {          // tiếp đất: tia lửa cầu vồng bắn lên từ mép dưới
+    for (let n = 0; n < 22; n++) spawnP(R_RAIN + fl(rnd() * 7), 2, 10 + rnd() * (W - 20), H - 1, (rnd() - 0.5) * 3, -1.2 - rnd() * 2.4, 0.13, 14 + fl(rnd() * 12), rnd() < 0.3 ? 2 : 1);
+  } else if (kind === FX_TAKEOFF) {
+    for (let n = 0; n < 12; n++) spawnP(R_RAIN + fl(rnd() * 7), 2, W / 2 + (rnd() - 0.5) * 70, H - 8 - rnd() * 6, (rnd() - 0.5) * 2, 0.8 + rnd() * 1.5, 0.08, 12 + fl(rnd() * 8), 1);
+  } else if (kind === FX_DJUMP) {
+    for (let n = 0; n < 14; n++) spawnP(R_RAIN + fl(rnd() * 7), 2, W / 2 + (rnd() - 0.5) * 40, H - 4, (rnd() - 0.5) * 3, 1 + rnd() * 1.5, 0.05, 14 + fl(rnd() * 8), 1);
+  } else if (kind === FX_SLIDE) {   // trượt: tia lửa toé ra từ chỗ tiếp xúc sàn
+    for (let n = 0; n < 2; n++) {
+      const side = n === 0 ? -1 : 1;
+      spawnP(R_SPARK, 2, W / 2 + side * (18 + rnd() * 40), H - 1, side * (0.8 + rnd() * 2.2), -0.6 - rnd() * 1.8, 0.12, 10 + fl(rnd() * 8), 1);
+    }
+    if ((T & 1) === 0) spawnP(R_RAIN + fl(rnd() * 7), 2, W / 2 + (rnd() - 0.5) * 100, H - 1, (rnd() - 0.5) * 2, -0.5 - rnd() * 1.5, 0.1, 12, 1);
+  } else if (kind === FX_DASH) {
+    for (let n = 0; n < 3; n++) {
+      const side = rnd() < 0.5 ? -1 : 1;
+      spawnP(R_SPARK, 2, W / 2 + side * (10 + rnd() * 30), H - 2 - rnd() * 10, side * (2 + rnd() * 3), 0.5 + rnd(), 0.05, 8 + fl(rnd() * 6), 1);
+    }
+  }
+}
+
+// ---------- Bóng tàn cầu vồng ----------
+const NGH = 10;
+const ghX = new Float32Array(NGH), ghY = new Float32Array(NGH), ghAge = new Int16Array(NGH).fill(-1), ghK = new Uint8Array(NGH);
+const ghMe = new Uint8Array(NGH);
+const ghMask = [];
+for (let i = 0; i < NGH; i++) ghMask.push(new Uint8Array(MW * MH));
+function spawnGhost(r) {
+  let s = 0;
+  for (let i = 0; i < NGH; i++) if (ghAge[i] < 0) { s = i; break; }
+  ghMask[s].set(r.mask);
+  ghX[s] = r.sx; ghY[s] = r.y; ghAge[s] = 0;
+  ghMe[s] = r.me ? 1 : 0;
+  ghK[s] = (r.ghostIdx * 2) % 7;       // đỏ → vàng → lam → tím
+  r.ghostIdx++;
+}
+function updateGhosts() {
+  for (let i = 0; i < NGH; i++) {
+    if (ghAge[i] < 0) continue;
+    ghX[i] -= 1.6;
+    if (++ghAge[i] > 20) ghAge[i] = -1;
+  }
+}
+function drawGhosts(camYi, shX, shY) {
+  for (let g = 0; g < NGH; g++) {
+    const a = ghAge[g];
+    if (a < 0) continue;
+    const c = a < 8 ? RB + ghK[g] : RBD + ghK[g];
+    const ox = fl(ghX[g]) - 6 + shX, oy = fl(ghY[g]) - 1 - MFY - camYi + shY;
+    const m = ghMask[g];
+    for (let j = 0; j < MH; j++) for (let i = 0; i < MW; i++) {
+      if (m[j * MW + i] === EMPTY) continue;
+      if (a >= 14 && ((i + j + a) & 1)) continue;   // tan dần bằng dither
+      px(ox + i, oy + j, c);
+    }
+  }
+}
+
+// Nhãn tên trên đầu
+function drawLabel(r, camYi, shX, shY) {
+  const w = textWidth(r.name);
+  const x = fl(r.sx) + 6 - (w >> 1) + shX;
+  const y = fl(r.y) - 19 - camYi + shY + Math.round(r.labelLift);
+  text(r.name, x, y, r.cH, C_BLACK);
+  if (r.labelLift > -2) { px(fl(r.sx) + 6 + shX, y + 7, r.cH); }
+}
+
+// =====================================================================
+//  Máy trạng thái của tôi + hiệu ứng near miss
+// =====================================================================
+const ST_RUN = 0, ST_WARN = 1, ST_DODGE = 2, ST_NEAR = 3, ST_BOOST = 4, ST_WARP = 5;
+let state = ST_RUN, stateT = 0;
+let hitStop = 0, slowMo = 0, popT = 0, popX = 0, popY = 0;
+let shakeT = 0, shakeAmp = 0;
+let nmLat = 0, nmSideLat = 0, nmSideDY = 0;   // phía của near miss (cho góc nhìn thứ nhất)
+function setState(s) { state = s; stateT = 0; }
+function shake(t, a) { if (t > shakeT) shakeT = t; if (a > shakeAmp) shakeAmp = a; }
+function onMyAction() { if (state === ST_RUN || state === ST_WARN) setState(ST_DODGE); }
+function updateState() {
+  stateT++;
+  if (state === ST_NEAR && stateT > 34) setState(T >= T_BOOST && T < T_WARP ? ST_BOOST : ST_RUN);
+  else if (state === ST_DODGE && stateT > 70) setState(ST_RUN);
+  else if (state === ST_WARN && stateT > 80) setState(ST_RUN);
+}
+function nearMiss(r, dx, dy, gap, big) {
+  r.flashT = 14; r.flashDX = dx; r.flashDY = dy;
+  DBG.near++;
+  if (DBG.nNear < 64) DBG.nearGap[DBG.nNear++] = gap;
+  if (!r.me) return;
+  nmSideLat = nmLat; nmSideDY = dy;
+  hitStop = 4; slowMo = 18;            // dừng 4 frame rồi chậm ~0.3 giây
+  popT = 46; popX = fl(r.sx) + 6; popY = fl(r.by0) - 2;
+  if (state !== ST_BOOST && state !== ST_WARP) setState(ST_NEAR);
+  for (let i = 0; i < 10; i++) {
+    spawnP(R_SPARK, 0, r.sx + 6 + dx * 6, r.y - 5 + dy * 5, dx * rnd() * 2 + (rnd() - 0.5), dy * rnd() * 2 + (rnd() - 0.5), 0.03, 10 + fl(rnd() * 8), 1);
+  }
+  if (big) shake(16, 2);
+}
+
+// Khoảng cách giữa 2 khung (âm = chạm nhau)
+function boxGap(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) {
+  const gx = Math.max(bx0 - ax1, ax0 - bx1) - 1;
+  const gy = Math.max(by0 - ay1, ay0 - by1) - 1;
+  return Math.max(gx, gy);
+}
+
+// =====================================================================
+//  Thiên thạch: 3 cỡ, viền + 2 cấp bóng + vết nứt dung nham
+// =====================================================================
+const MET_R = [2, 4, 6];
+const MET_FLIGHT = [32, 42, 54];
+const MET_SPR = [];
+function buildMeteorSprite(R, frame) {
+  const D = 2 * R + 3, c = R + 1, s = makeSprite(D, D);
+  const amp = Math.min(0.5, R * 0.1);
+  const inside = function (x, y) {
+    const dx = x - c, dy = y - c, a = Math.atan2(dy, dx);
+    const rr = R + 0.45 + amp * Math.sin(a * 3 + R) + amp * 0.6 * Math.sin(a * 5 + 1.3);
+    return dx * dx + dy * dy <= rr * rr;
+  };
+  for (let y = 0; y < D; y++) for (let x = 0; x < D; x++) {
+    if (!inside(x, y)) continue;
+    const edge = !inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1);
+    const l = (-(x - c) * 0.7 - (y - c) * 0.7) / R;
+    s.d[y * D + x] = edge ? 29 : l > 0.2 ? 31 : 30;
+  }
+  // vết nứt dung nham (đổi sáng giữa 2 frame để trông như cháy)
+  const cr = frame ? C_YEL : C_LAVA, core = frame ? C_WHITE : C_YEL;
+  if (R <= 2) { s.d[c * D + c] = cr; s.d[(c + 1) * D + c] = 32; return s; }
+  const path = [[0, 0], [1, 1], [2, 1], [3, 2], [-1, 1], [-2, 2], [1, -1], [1, -2]];
+  for (let i = 0; i < path.length; i++) {
+    const x = c + Math.round(path[i][0] * R / 4), y = c + Math.round(path[i][1] * R / 4);
+    if (s.d[y * D + x] !== 255 && s.d[y * D + x] !== 29) s.d[y * D + x] = i === 0 ? core : cr;
+  }
+  if (R >= 6) { s.d[(c + 2) * D + c - 3] = 29; s.d[(c - 3) * D + c + 1] = 29; s.d[(c - 2) * D + c - 2] = 29; }
+  return s;
+}
+for (let k = 0; k < 3; k++) { MET_SPR.push(buildMeteorSprite(MET_R[k], 0)); MET_SPR.push(buildMeteorSprite(MET_R[k], 1)); }
+
+const NMET = 10, F_PASS = 0, F_SHATTER = 1;
+const mOn = new Uint8Array(NMET), mSize = new Uint8Array(NMET), mFate = new Uint8Array(NMET), mTgt = new Int8Array(NMET);
+const mX = new Float32Array(NMET), mY = new Float32Array(NMET), mVX = new Float32Array(NMET), mVY = new Float32Array(NMET);
+const mMin = new Float32Array(NMET * 2), mDone = new Uint8Array(NMET * 2), mHit = new Uint8Array(NMET * 2);
+const mNDX = new Int8Array(NMET * 2), mNDY = new Int8Array(NMET * 2);
+const mLat0 = new Float32Array(NMET), mLatT = new Float32Array(NMET), mArr = new Int16Array(NMET), mFl = new Int16Array(NMET);
+function meteorLat(i) { return mLatT[i] + (mLat0[i] - mLatT[i]) * (mArr[i] - T) / mFl[i]; }
+
+function spawnMeteor(size, tgt, arrival, aimH, fate, aimDX, slope) {
+  let i = 0;
+  for (; i < NMET; i++) if (!mOn[i]) break;
+  if (i === NMET) return;
+  const flight = arrival - T;
+  const relT = tgt === 1 ? relAt(arrival) : 0;
+  const tx = BASE_X - lead + relT + 6 + aimDX;
+  const ft = floorTop(camXAt(arrival) + tx);
+  const ty = (ft === NOFLOOR ? FLOOR_BASE : ft) - aimH;
+  const sx0 = 172 + size * 6, sy0 = ty - slope * (sx0 - tx);   // bay chéo từ góc phải trên
+  mOn[i] = 1; mSize[i] = size; mFate[i] = fate; mTgt[i] = tgt;
+  mX[i] = sx0; mY[i] = sy0; mVX[i] = (tx - sx0) / flight; mVY[i] = (ty - sy0) / flight;
+  mLatT[i] = (tgt === 1 ? SONNET.lane : OPUS.lane) + 3; mLat0[i] = mLatT[i] + 46; mArr[i] = arrival; mFl[i] = flight;
+  for (let k = 0; k < 2; k++) { mMin[i * 2 + k] = 99; mDone[i * 2 + k] = 0; mHit[i * 2 + k] = 0; mReact[i * 2 + k] = 0; }
+}
+function meteorVsRacer(i, k, r) {
+  const R = MET_R[mSize[i]], x = Math.round(mX[i]), y = Math.round(mY[i]);
+  const g = boxGap(x - R, y - R, x + R, y + R, r.bx0, r.by0, r.bx1, r.by1);
+  const j = i * 2 + k;
+  if (g < 0 && !mHit[j]) { mHit[j] = 1; DBG.hits++; }
+  if (g < mMin[j]) {
+    mMin[j] = g;
+    mNDX[j] = Math.sign(x - (r.bx0 + r.bx1) / 2); mNDY[j] = Math.sign(y - (r.by0 + r.by1) / 2);
+  } else if (!mDone[j] && mMin[j] >= 0 && mMin[j] <= 5 && g > mMin[j] + 1) {
+    mDone[j] = 1;                                   // vừa sượt qua → near miss
+    nmLat = Math.sign(meteorLat(i) - r.lane) || 1;
+    nearMiss(r, mNDX[j], mNDY[j], mMin[j], mSize[i] === 2);
+  }
+}
+const mReact = new Uint8Array(NMET * 2);
+// AI phản xạ: thiên thạch không nhắm vào mình nhưng sẽ cắt qua → trượt / nhảy / né nhanh
+// Mô phỏng nhanh 1 phương án né (0 chạy thẳng, 1 trượt, 2 nhảy sau `delay` bước, 3 dash)
+function dodgeClears(i, r, ft, mode, delay) {
+  const R = MET_R[mSize[i]];
+  for (let s = 1; s <= 30; s++) {
+    const x = Math.round(mX[i] + mVX[i] * s), y = Math.round(mY[i] + mVY[i] * s);
+    let x0 = r.bx0, x1 = r.bx1, y0 = ft - 10, y1 = ft - 1;
+    if (mode === 1) y0 = ft - 5;
+    else if (mode === 2 && s > delay + 3) { const h = Math.max(0, jumpH(s - delay - 3)); y0 -= h; y1 -= h; }
+    else if (mode === 3) { const d = 3.6 * Math.min(s, 6); x0 += d; x1 += d; }
+    if (boxGap(x - R, y - R, x + R, y + R, x0, y0, x1, y1) < 1) return false;
+  }
+  return true;
+}
+// AI phản xạ: thiên thạch không nhắm vào mình nhưng sẽ cắt qua → chọn cách né an toàn
+function reactToMeteors(r, k) {
+  if (!r.grounded || r.preJ > 0 || r.slideT > 0 || r.dashT > 0 || r.nSch > 0) return;
+  const ft = floorTop(r.wx);
+  if (ft === NOFLOOR) return;
+  for (let i = 0; i < NMET; i++) {
+    if (!mOn[i] || mTgt[i] === k || mReact[i * 2 + k]) continue;
+    if (mX[i] - r.bx1 > 70 || dodgeClears(i, r, ft, 0, 0)) continue;
+    mReact[i * 2 + k] = 1;
+    if (r.me) onMyAction();
+    if (dodgeClears(i, r, ft, 1, 0)) { r.slideT = 24; r.forceQ = true; return; }
+    for (let d = 0; d <= 10; d++) {
+      if (dodgeClears(i, r, ft, 2, d)) { schedule(r, T + 1 + d, A_JUMP, 0); return; }
+    }
+    doAction(r, A_DASH, 0);
+    return;
+  }
+}
+function updateMeteors() {
+  for (let i = 0; i < NMET; i++) {
+    if (!mOn[i]) continue;
+    mX[i] += mVX[i]; mY[i] += mVY[i];
+    const R = MET_R[mSize[i]], v = Math.hypot(mVX[i], mVY[i]);
+    const ux = mVX[i] / v, uy = mVY[i] / v;
+    // đuôi lửa: dung nham → tối
+    pLatBase = meteorLat(i); pLatJit = R * 1.5; pLatV = 0.35 * (mLat0[i] - mLatT[i]) / mFl[i];
+    for (let n = 0; n <= mSize[i] + 1; n++) {
+      spawnP(R_TAIL, 0, mX[i] - ux * R * 0.8 + (rnd() - 0.5) * R, mY[i] - uy * R * 0.8 + (rnd() - 0.5) * R,
+        -ux * 0.35 + (rnd() - 0.5) * 0.5, -uy * 0.35 + (rnd() - 0.5) * 0.5 - 0.05, 0, 9 + mSize[i] * 5 + fl(rnd() * 6),
+        mSize[i] === 2 && n < 2 ? 2 : 1);
+    }
+    meteorVsRacer(i, 0, OPUS);
+    meteorVsRacer(i, 1, SONNET);
+    if (mSize[i] === 2 && (T & 3) === 0 && mX[i] < 150 && mX[i] > 0) shake(4, 1);
+    // bị tránh: vỡ vụn phía sau (không đâm sàn) hoặc bay ra khỏi màn hình
+    const tg = mTgt[i] === 1 ? SONNET : OPUS;
+    if (mFate[i] === F_SHATTER && mX[i] < tg.sx + 4) {
+      const ft = floorTop(fl(camX) + fl(mX[i]));
+      if (ft !== NOFLOOR && mY[i] + R >= ft - 5) {
+        pLatV = 0; pLatJit = R * 4;
+        for (let n = 0; n < 14 + R * 2; n++) {
+          spawnP(R_DEBRIS, 0, mX[i] + (rnd() - 0.5) * R * 2, mY[i] + (rnd() - 0.5) * R * 2,
+            -0.8 - rnd() * 2.6, -0.6 - rnd() * 1.6, 0.12, 16 + fl(rnd() * 14), rnd() < 0.35 ? 2 : 1);
+        }
+        for (let n = 0; n < 10; n++) {
+          spawnP(R_SPARK, 0, mX[i], mY[i], (rnd() - 0.7) * 3, -rnd() * 2, 0.08, 8 + fl(rnd() * 8), 1);
+        }
+        mOn[i] = 0;
+        continue;
+      }
+    }
+    if (mX[i] < -24 || mY[i] > H + 40) mOn[i] = 0;
+  }
+}
+function drawMeteors(camYi, shX, shY) {
+  const fr = (T >> 2) & 1;
+  for (let i = 0; i < NMET; i++) {
+    if (!mOn[i]) continue;
+    const R = MET_R[mSize[i]];
+    blit(MET_SPR[mSize[i] * 2 + fr], Math.round(mX[i]) - R - 1 + shX, Math.round(mY[i]) - R - 1 - camYi + shY);
+  }
+}
+
+// =====================================================================
+//  Chùm tia: báo trước magenta 0.5s → lõi trắng + viền xanh lam
+// =====================================================================
+const BEAM_LAT = 0.5, BEAM_HW = 10;   // chùm tia ở góc nhìn thứ nhất: rộng phủ cả 2 làn
+const NBEAM = 3, BEAM_SPEED = 10, BEAM_WARN = 30, BEAM_HOLD = 14, BEAM_FADE = 9;
+const bPhase = new Uint8Array(NBEAM), bT = new Int16Array(NBEAM), bFire = new Int16Array(NBEAM);
+const bYR = new Float32Array(NBEAM), bYL = new Float32Array(NBEAM), bTh = new Uint8Array(NBEAM), bHead = new Float32Array(NBEAM);
+const bClip = new Int16Array(NBEAM), bDone = new Uint8Array(NBEAM * 2), bHit = new Uint8Array(NBEAM * 2);
+function beamY(b, x) { return bYL[b] + (bYR[b] - bYL[b]) * x / W; }
+function beamThick(b) {
+  if (bPhase[b] !== 4) return bTh[b];
+  const t = bTh[b] - 2 * fl((BEAM_FADE - bT[b]) / 3);
+  return t < 1 ? 1 : t;
+}
+function computeClip(b) {          // chùm chéo dừng lại khi chạm sàn
+  bClip[b] = -4;
+  if (bYL[b] <= bYR[b] + 4) return;
+  for (let x = W - 1; x >= 0; x--) {
+    const f = floorTop(camX + x);
+    if (f !== NOFLOOR && beamY(b, x) >= f - 1) { bClip[b] = x + 1; return; }
+  }
+}
+function spawnBeam(yR, yL, th) {
+  let b = 0;
+  for (; b < NBEAM; b++) if (!bPhase[b]) break;
+  if (b === NBEAM) return;
+  bPhase[b] = 1; bT[b] = BEAM_WARN; bFire[b] = T + BEAM_WARN; bYR[b] = yR; bYL[b] = yL; bTh[b] = th; bHead[b] = W + 2;
+  bDone[b * 2] = bDone[b * 2 + 1] = 0; bHit[b * 2] = bHit[b * 2 + 1] = 0;
+  computeClip(b);
+  planBeamDodge(OPUS, b);
+  planBeamDodge(SONNET, b);
+}
+// Chiều cao nhảy sau t bước (khớp với tích phân trong updateRacer)
+function jumpH(t) { return JUMP_V * t - GRAV * t * (t + 1) / 2; }
+// AI: chọn trượt / nhảy / nhảy kép cho đúng khoảnh khắc sát nút
+function planBeamDodge(r, b) {
+  const h2 = bTh[b] >> 1;
+  const x0 = r.bx0 + 1, x1 = r.bx1 - 1;
+  const top = Math.min(beamY(b, x0), beamY(b, x1)) - h2, bot = Math.max(beamY(b, x0), beamY(b, x1)) + h2;
+  const Ta = bFire[b] + Math.ceil((W + 2 - r.bx1 - 1) / BEAM_SPEED);
+  const Tend = bFire[b] + Math.ceil((W + 6) / BEAM_SPEED) + BEAM_HOLD + BEAM_FADE + 1;
+  if (bClip[b] > r.bx1) return;               // chùm chạm sàn trước khi tới
+  let fmin = 999, fmax = -999;
+  for (let t = Ta - 12; t <= Tend; t++) {
+    const f = floorTop(camXAt(t) + r.sx + 6);
+    if (f === NOFLOOR) continue;
+    if (f < fmin) fmin = f; if (f > fmax) fmax = f;
+  }
+  if (bot < fmin - 9) return;                         // bay qua trên đầu
+  if (bot < fmin - 5) {                               // trượt dưới chùm
+    schedule(r, Ta - 7, A_SLIDE, Tend - (Ta - 7) + 3);
+    return;
+  }
+  const need = fmax - 1 - Math.floor(top) + 1;        // nhảy qua chùm
+  let t1 = 1;
+  while (t1 < 16 && jumpH(t1) < need + 0.5) t1++;
+  const take = Ta - t1;
+  schedule(r, take - 3, A_JUMP, 0);
+  let t2 = t1;
+  while (t2 < 40 && jumpH(t2) >= need) t2++;
+  if (take + t2 < Tend + 2) schedule(r, take + 14, A_DJUMP, 0);
+}
+function beamVsRacer(b, k, r, head) {
+  const j = b * 2 + k;
+  if (r.bx1 < head) return;
+  const h2 = beamThick(b) >> 1;
+  const cx = (r.bx0 + r.bx1) >> 1;
+  if (cx < bClip[b]) return;
+  const yA = Math.round(beamY(b, Math.max(r.bx0, head))), yB = Math.round(beamY(b, r.bx1));
+  const top = Math.min(yA, yB) - h2, bot = Math.max(yA, yB) + h2;
+  const g = boxGap(r.bx0, top, r.bx1, bot, r.bx0, r.by0, r.bx1, r.by1);
+  if (g < 0 && !bHit[j]) { bHit[j] = 1; DBG.hits++; }
+  if (!bDone[j] && g >= 0 && g <= 4 && bPhase[b] === 2) {
+    bDone[j] = 1;
+    nmLat = 0;
+    nearMiss(r, 0, (top + bot) / 2 < (r.by0 + r.by1) / 2 ? -1 : 1, g, false);
+  }
+}
+function updateBeams() {
+  for (let b = 0; b < NBEAM; b++) {
+    const ph = bPhase[b];
+    if (!ph) continue;
+    computeClip(b);
+    pLatBase = BEAM_LAT; pLatJit = BEAM_HW * 2; pLatV = 0;
+    if (ph === 1) {
+      if (--bT[b] <= 0) { bPhase[b] = 2; shake(10, 1); }
+      continue;
+    }
+    if (ph === 2) {
+      bHead[b] -= BEAM_SPEED;
+      const lim = bClip[b];
+      if (bHead[b] <= lim) { bHead[b] = lim; bPhase[b] = 3; bT[b] = BEAM_HOLD; }
+      const hy = beamY(b, bHead[b]);
+      for (let n = 0; n < 3; n++) {
+        spawnP(R_BEAM, 0, bHead[b], hy + (rnd() - 0.5) * 4, 1 + rnd() * 2.5, (rnd() - 0.5) * 2, 0, 8 + fl(rnd() * 6), 1);
+      }
+    } else if (ph === 3) {
+      if (--bT[b] <= 0) { bPhase[b] = 4; bT[b] = BEAM_FADE; }
+    } else if (ph === 4) {
+      if (--bT[b] <= 0) { bPhase[b] = 0; continue; }
+    }
+    if (bClip[b] > 0 && bHead[b] <= bClip[b]) {     // chùm chéo đốt sàn → tia lửa
+      const f = floorTop(camX + bClip[b]);
+      if (f !== NOFLOOR) for (let n = 0; n < 2; n++) {
+        spawnP(R_RAIN + fl(rnd() * 7), 1, camX + bClip[b], f - 1, -rnd() * 2, -0.5 - rnd() * 1.8, 0.1, 12 + fl(rnd() * 8), 1);
+      }
+    }
+    const head = Math.round(bHead[b]);
+    beamVsRacer(b, 0, OPUS, head);
+    beamVsRacer(b, 1, SONNET, head);
+  }
+}
+function drawBeams(camYi, shX, shY) {
+  for (let b = 0; b < NBEAM; b++) {
+    const ph = bPhase[b];
+    if (!ph) continue;
+    const ey = Math.round(beamY(b, W - 1)) - camYi + shY;
+    if (ph === 1) {                                  // đường chớp 1px báo trước
+      if (((bT[b] >> 1) & 1) === 0) {
+        const xe = Math.max(0, bClip[b]);
+        line(W - 1 + shX, ey, xe + shX, Math.round(beamY(b, xe)) - camYi + shY, C_MAG);
+      }
+      circle(W - 1 + shX, ey, 2 + ((bT[b] >> 2) & 1), C_MAG);
+      px(W - 2 + shX, ey, C_WHITE);
+      continue;
+    }
+    const th = beamThick(b), h2 = th >> 1;
+    const x0 = Math.max(0, Math.round(bHead[b]));
+    for (let x = x0; x < W; x++) {
+      const cy = Math.round(beamY(b, x)) - camYi + shY;
+      for (let k = -h2; k <= h2; k++) {
+        const edge = (k === -h2 || k === h2) && th > 1;
+        px(x + shX, cy + k, edge ? C_CYAN : C_WHITE);
+      }
+      if ((x * 7 + T * 5) % 13 === 0) px(x + shX, cy - h2 - 1, C_MAG);
+      if ((x * 5 + T * 3) % 17 === 0) px(x + shX, cy + h2 + 1, C_MAG);
+    }
+    if (ph === 2) {                                  // đầu chùm rung lắc
+      const hx = Math.round(bHead[b]) + shX;
+      const w = WOBBLE[(T + b * 5) % WOBBLE.length];
+      const cy = Math.round(beamY(b, bHead[b])) - camYi + shY + w;
+      rect(hx - 1, cy - h2 - 1, 4, th + 2, C_CYAN);
+      rect(hx, cy - h2, 3, th, C_WHITE);
+      px(hx - 2, cy + WOBBLE[(T + 3) % WOBBLE.length], C_MAG);
+      px(hx - 3, cy - w, C_CYAN);
+    }
+    // nguồn phát bên phải
+    circle(W - 1 + shX, ey, 3, (T & 2) ? C_CYAN : C_MAG);
+    rect(W - 3 + shX, ey - 1, 3, 3, C_WHITE);
+  }
+}
+
+// =====================================================================
+//  Kịch bản tấn công tất định (lặp lại y hệt mỗi vòng)
+// =====================================================================
+const EV_WARN = 1, EV_MET = 2, EV_BEAM = 3, EV_ACT = 4, EV_STATE = 5, EV_TEXT = 6;
+const ME = 0, RIVAL = 1, SMALL = 0, MED = 1, BIG = 2;
+const TXT = ['GO!', 'BOOST!', 'FINISH!', 'OPUS 5.5 MAX WINS!'];
+const EV_ROWS = [
+  // tick, loại, tham số...
+  [2, EV_TEXT, 0, 50],
+  // P1 · thiên thạch đơn → tôi nhảy, nó sượt dưới chân rồi vỡ vụn phía sau
+  [155, EV_WARN, 0],
+  [183, EV_MET, MED, ME, 225, 4, F_SHATTER, 0, 42],
+  [212, EV_ACT, ME, A_JUMP, 0],
+  // P2 · 3 thiên thạch liên tiếp → nhảy, nhảy kép giữa không trung; Sonnet trượt
+  [335, EV_WARN, 0],
+  [363, EV_MET, SMALL, ME, 395, 8, F_SHATTER, 0, 42],
+  [381, EV_MET, SMALL, ME, 413, 25, F_PASS, 0, 42],
+  [388, EV_MET, SMALL, RIVAL, 420, 10, F_SHATTER, 0, 35],
+  [383, EV_ACT, ME, A_JUMP, 0],
+  [401, EV_ACT, ME, A_DJUMP, 0],
+  [413, EV_ACT, RIVAL, A_SLIDE, 18],
+  // P3 · chùm tia thấp → cả hai nhảy (+ nhảy kép)
+  [640, EV_BEAM, 0, 6, 6, 5],
+  // P4 · chùm tia cao → trượt sát rạt
+  [830, EV_BEAM, 1, 0, 0, 5],
+  // P5 · chùm chéo + thiên thạch → tôi nhảy rồi né nhanh trên không, Sonnet trượt
+  [1010, EV_BEAM, 2, 5, 10, 5],
+  [1024, EV_MET, MED, ME, 1066, 25, F_PASS, 0, 90],
+  [1056, EV_ACT, ME, A_DASH, 0],
+  // P6 · thiên thạch lớn + khe hở sàn → né nhanh rồi nhảy qua khe
+  [1110, EV_WARN, 0],
+  [1139, EV_MET, BIG, ME, 1193, 7, F_PASS, 0, 90],
+  [1184, EV_ACT, ME, A_DASH, 0],
+  // BOOST → về đích → WARP
+  [T_BOOST, EV_STATE, ST_BOOST],
+  [T_BOOST + 2, EV_TEXT, 1, 60],
+  [1338, EV_ACT, RIVAL, A_DASH, 0],
+  [1446, EV_ACT, ME, A_DASH, 0],
+  [1476, EV_ACT, ME, A_DASH, 0],
+  [T_FINISH, EV_TEXT, 2, 26],
+  [T_FINISH + 26, EV_TEXT, 3, 74],
+  [1530, EV_ACT, ME, A_JUMP, 0],
+  [T_WARP, EV_STATE, ST_WARP]
+];
+EV_ROWS.sort(function (a, b) { return a[0] - b[0]; });
+const NEV = EV_ROWS.length, EVS = 10;
+const EV = new Int16Array(NEV * EVS);
+for (let i = 0; i < NEV; i++) for (let j = 0; j < EV_ROWS[i].length; j++) EV[i * EVS + j] = EV_ROWS[i][j];
+let evIdx = 0, bannerId = 0, bannerT = 0, bannerMax = 1, warnMarkT = 0;
+
+function racerOf(k) { return k === ME ? OPUS : SONNET; }
+function floorAhead(r, t) { const f = floorTop(camXAt(t) + r.sx + 6); return f === NOFLOOR ? FLOOR_BASE : f; }
+function fireEvent(o) {
+  const ty = EV[o + 1], a = EV[o + 2], b = EV[o + 3], c = EV[o + 4];
+  if (ty === EV_WARN) {
+    if (state !== ST_BOOST) setState(ST_WARN);
+    OPUS.lookAhead = 36; SONNET.lookAhead = 36; warnMarkT = 30;
+  } else if (ty === EV_MET) {
+    spawnMeteor(a, b, c, EV[o + 5], EV[o + 6], EV[o + 7], EV[o + 8] / 100);
+  } else if (ty === EV_BEAM) {
+    if (state !== ST_BOOST) setState(ST_WARN);
+    OPUS.lookAhead = 36; SONNET.lookAhead = 36;
+    const fire = T + BEAM_WARN;
+    const xo = OPUS.sx + 6, xs = SONNET.sx + 6;
+    const tO = fire + Math.ceil((W + 2 - xo) / BEAM_SPEED);
+    if (a === 0) spawnBeam(FLOOR_BASE - b, FLOOR_BASE - c, EV[o + 5]);
+    else if (a === 1) {                       // chùm cao: canh đúng để tôi trượt sát 2px
+      let fmin = 999;
+      for (let t = tO - 12; t <= tO + 40; t++) { const f = floorAhead(OPUS, t); if (f < fmin) fmin = f; }
+      spawnBeam(fmin - 9, fmin - 9, EV[o + 5]);
+    } else {                                  // chùm chéo qua tôi (thấp) và Sonnet (cao)
+      const yo = floorAhead(OPUS, tO) - b, ys = floorAhead(SONNET, tO) - c;
+      const k = Math.abs(xs - xo) < 8 ? -0.25 : (ys - yo) / (xs - xo);
+      spawnBeam(yo + k * (W - xo), yo - k * xo, EV[o + 5]);
+    }
+  } else if (ty === EV_ACT) {
+    doAction(racerOf(a), b, c);
+  } else if (ty === EV_STATE) {
+    setState(a);
+  } else if (ty === EV_TEXT) {
+    bannerId = a; bannerT = b; bannerMax = b;
+  }
+}
+function runDirector() {
+  while (evIdx < NEV && EV[evIdx * EVS] <= T) { fireEvent(evIdx * EVS); evIdx++; }
+}
+
+// =====================================================================
+//  Camera: theo dõi trễ, dự đoán, rung; reset vòng lặp
+// =====================================================================
+let camY = 0, boostAmt = 0;
+function boostAt(t) {
+  if (t < T_BOOST || t >= T_WARP) return 0;
+  return smooth01((t - T_BOOST) / 60) * (t > T_FINISH ? 1 - smooth01((t - T_FINISH) / 90) : 1);
+}
+function updateCamera() {
+  const tl = clamp((spd - CRUISE) * 2.4, 0, 8);
+  lead += (tl - lead) * 0.05;
+  boostAmt = boostAt(T);
+  const ty = (OPUS.y - FLOOR_BASE) * 0.6 + boostAmt * 5;   // BOOST: hạ camera, lộ nhiều sàn hơn
+  camY += (ty - camY) * (ty < camY ? 0.06 : 0.14);       // nhảy lên thì camera nâng chậm hơn
+}
+function updateLabels() {
+  const ahead = SONNET.sx > OPUS.sx ? SONNET : OPUS, behind = ahead === OPUS ? SONNET : OPUS;
+  const close = Math.abs(OPUS.sx - SONNET.sx) < (OPUS.lw + SONNET.lw) / 2 + 3 && Math.abs(OPUS.y - SONNET.y) < 9;
+  ahead.labelLift += ((close ? -7 : 0) - ahead.labelLift) * 0.25;
+  behind.labelLift += (0 - behind.labelLift) * 0.25;
+}
+OPUS.lw = textWidth(OPUS.name); SONNET.lw = textWidth(SONNET.name);
+
+function loopReset() {
+  T = 0; camX = 0; spd = speedAt(0); rseed(20261006);
+  evIdx = 0; bannerT = 0; warnMarkT = 0; hitStop = 0; slowMo = 0;
+  for (let i = 0; i < NMET; i++) mOn[i] = 0;
+  for (let b = 0; b < NBEAM; b++) bPhase[b] = 0;
+  clearParticles();
+  for (let i = 0; i < NRING; i++) ringAge[i] = -1;
+  for (let i = 0; i < NGH; i++) ghAge[i] = -1;
+  for (let i = 0; i < NSL; i++) respawnSpeedLine(i, rnd() * W * 1.5);
+  const base = BASE_X - Math.round(lead);
+  resetRacer(OPUS, base);
+  resetRacer(SONNET, base + Math.round(relAt(0)));
+  updatePose(OPUS); buildMask(OPUS); updatePose(SONNET); buildMask(SONNET);
+  setState(ST_RUN);
+  if (FP) fpReset();
+}
+
+// ---------- Một bước mô phỏng 60Hz ----------
+function worldStep() {
+  spd = speedAt(T);
+  camX = CAMX[T];
+  runDirector();
+  updateCamera();
+  const base = BASE_X - Math.round(lead);
+  runSchedule(OPUS); runSchedule(SONNET);
+  updateRacer(OPUS, base);
+  updateRacer(SONNET, base + relAt(T));
+  reactToMeteors(OPUS, 0);
+  reactToMeteors(SONNET, 1);
+  updateMeteors();
+  updateBeams();
+  updateParticles();
+  updateRings();
+  updateGhosts();
+  // đường tốc độ cận cảnh: số lượng tỉ lệ tốc độ
+  for (let i = 0; i < NSL; i++) {
+    slX[i] -= spd * 2.4;
+    if (slX[i] + slL[i] * 2 < 0) respawnSpeedLine(i, W + rnd() * 50);
+  }
+  // hạt sáng cầu vồng rơi từ mép dưới sàn
+  for (let n = 0; n < 3; n++) {
+    const wx = fl(camX) + fl(rnd() * W), ft = floorTop(wx);
+    if (ft === NOFLOOR) continue;
+    pLatBase = (n & 1) ? -ROADW - 1 : ROADW + 1; pLatJit = 3; pLatV = (n & 1) ? -0.05 : 0.05;
+    spawnP(R_DROP + fl(rnd() * 7), 1, wx, ft + 13 + rnd() * 2, -0.1 - rnd() * 0.3, 0.2 + rnd() * 0.5, 0.01, 30 + fl(rnd() * 40), 1);
+  }
+  updateLabels();
+  updateState();
+  if (warnMarkT > 0) warnMarkT--;
+  if (bannerT > 0) bannerT--;
+  if (FP) fpCamStep();
+  T++;
+  if (T >= LOOP) loopReset();
+}
+
+let rt = 0;   // bộ đếm thời gian thực (60Hz), chạy cả khi hit stop
+function tick() {
+  rt++;
+  if (shakeT > 0) shakeT--; else shakeAmp = 0;
+  if (popT > 0) popT--;
+  if (hitStop > 0) { hitStop--; return; }               // hit stop: đứng hình toàn bộ
+  if (slowMo > 0) { slowMo--; if (slowMo & 1) return; } // slow motion: thưa bước cập nhật
+  worldStep();
+}
+
+// =====================================================================
+//  GÓC NHÌN THỨ NHẤT — kiểu Super Scaler 16-bit, nhìn qua mắt Opus.
+//  Mô phỏng giữ nguyên; "x trên đường đua" thành chiều sâu phía trước.
+// =====================================================================
+const FOC = 72;          // tiêu cự (px)
+const DZS = 4;           // 1 đơn vị đường đua = 4 đơn vị chiều sâu
+const NEARZ = 3;         // mặt phẳng gần
+const HOR0 = 34;         // đường chân trời mặc định
+const SEG = 1;           // độ dài 1 đoạn đường (đơn vị đường đua)
+let fpEye = 7, fpLat = OPUS.lane, fpHor = HOR0, fpEyeX = 0, fpCurve = 0, skyOff = 0;
+let fpSide = 0, fpSideV = 0, fpBob = 0;
+let PX = 0, PY = 0, PS = 0;      // kết quả phép chiếu (không cấp phát)
+
+// Starfield 3D (sao trung cảnh) và đường tốc độ toả từ điểm tụ
+const NST = 40;
+const stX = new Float32Array(NST), stY = new Float32Array(NST), stZ = new Float32Array(NST);
+const NFS = 22;
+const fsR = new Float32Array(NFS), fsA = new Float32Array(NFS), fsL = new Uint8Array(NFS);
+(function buildFP() {
+  rseed(4242);
+  for (let i = 0; i < NST; i++) {
+    const a = rnd() * Math.PI * 2, d = 34 + rnd() * 90;
+    stX[i] = Math.cos(a) * d * 1.6; stY[i] = Math.sin(a) * d; stZ[i] = 20 + rnd() * 700;
+  }
+  for (let i = 0; i < NFS; i++) { fsA[i] = rnd() * Math.PI * 2; fsR[i] = 30 + rnd() * 110; fsL[i] = 6 + fl(rnd() * 14); }
+})();
+
+function curveK(wx) { return 0.00042 * Math.sin(wx * 0.0021) + 0.00018 * Math.sin(wx * 0.0057 + 2.1); }
+
+function project(dS, h, lat) {
+  const dz = dS * DZS;
+  if (dz < NEARZ) return false;
+  PS = FOC / dz;
+  PX = W / 2 + (lat - fpLat + fpCurve * dz * dz) * PS;
+  PY = fpHor - (h - fpEye) * PS;
+  return true;
+}
+function roadHeight(wx) {           // độ cao mặt đường (dương = lên trên)
+  const f = floorTop(wx);
+  return FLOOR_BASE - (f === NOFLOOR ? FLOOR_BASE + Math.round(floorWave(wx)) : f);
+}
+
+// ---------- Camera (chạy theo bước mô phỏng) ----------
+function fpReset() { fpEye = 7; fpSide = 0; fpSideV = 0; }
+function fpCamStep() {
+  const r = OPUS;
+  // mắt bám theo thân (squash/stretch đổi độ cao mắt); nhảy lên thì nâng chậm hơn
+  const eyeT = (FLOOR_BASE - r.y) + (MFY + 1 - r.eyeRow) - boostAmt * 1.5;
+  fpEye += (eyeT - fpEye) * (eyeT > fpEye ? 0.42 : 0.62);
+  // né nhanh: lách ngang khỏi hướng thiên thạch rồi về làn
+  if (r.dashT > 0) fpSideV -= 0.75;
+  fpSideV += -fpSide * 0.07; fpSideV *= 0.8; fpSide += fpSideV;
+  fpLat = r.lane + fpSide;
+  fpHor = HOR0 - Math.round(boostAmt * 6);          // BOOST: hạ góc nhìn, lộ nhiều sàn hơn
+  skyOff += curveK(camX) * spd * 260;
+  // sao trung cảnh lao về phía mình
+  for (let i = 0; i < NST; i++) {
+    stZ[i] -= spd * DZS * 0.55;
+    if (stZ[i] < 6) stZ[i] += 700;
+  }
+  // đường tốc độ toả ra mép màn hình
+  for (let i = 0; i < NFS; i++) {
+    fsR[i] += spd * (0.9 + fsR[i] * 0.03);
+    if (fsR[i] > 150) { fsR[i] = 26 + rnd() * 20; fsA[i] = rnd() * Math.PI * 2; fsL[i] = 6 + fl(rnd() * 14); }
+  }
+}
+
+// ---------- Bầu trời ----------
+const BGV = [];
+for (let o = 0; o <= BGH - H; o++) BGV.push(BG32.subarray(o * W, (o + H) * W));
+function drawSkyFP() {
+  FB.set(BGV[clamp(8 + (HOR0 - fpHor), 0, BGH - H)]);
+  blit(NEB, fl(((40 - skyOff * 0.5) % 360 + 360) % 360) - 120, fpHor - 30);
+  const pxp = fl(((104 - skyOff) % 300 + 300) % 300) - 60;
+  blit(PLANET, pxp, fpHor - 36);
+  blit(MOON, pxp + 52, fpHor - 12);
+  const fo = fl(skyOff * 0.7), fy = HOR0 - fpHor;
+  for (let i = 0; i < NFAR; i++) {
+    const x = ((farX[i] - fo) % W + W) % W, y = farY[i] - fy;
+    const ph = (T + farP[i] * 3) % 120;
+    if (ph < 5 && (farP[i] & 3) === 0) {
+      px(x, y, C_WHITE); px(x - 1, y, C_DIM); px(x + 1, y, C_DIM); px(x, y - 1, C_DIM); px(x, y + 1, C_DIM);
+    } else px(x, y, (farP[i] & 1) ? C_DIM : (ph & 32) ? 3 : 5);
+  }
+  // sao trung cảnh: vệt 2~6px hướng ra khỏi điểm tụ, dài theo tốc độ
+  const L = clamp(1 + Math.round((spd - 2.6) * 1.1), 2, T >= T_WARP ? 12 : 6);
+  const vx = W / 2, vy = fpHor;
+  for (let i = 0; i < NST; i++) {
+    const ps = FOC / stZ[i];
+    const x = Math.round(vx + stX[i] * ps), y = Math.round(vy - stY[i] * ps);
+    if (x < -8 || x > W + 8 || y < -8 || y > H + 8) continue;
+    let dx = x - vx, dy = y - vy;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    dx /= d; dy /= d;
+    line(x, y, Math.round(x - dx * (L - 1)), Math.round(y - dy * (L - 1)), C_DIM);
+    px(x, y, C_WHITE);
+  }
+}
+
+// ---------- Đường cầu vồng 7 làn, đoạn tối chạy ào về phía mình ----------
+const segX = new Float32Array(2), segY = new Float32Array(2), segW = new Float32Array(2);
+function fillRoadRows(yNear, yFar, x0, w0, y0, x1, w1, y1, dark, checker, maxY) {
+  const top = Math.max(0, Math.ceil(yFar)), bot = Math.min(maxY, Math.ceil(yNear));
+  for (let y = top; y < bot; y++) {
+    const t = (y0 - y) / (y0 - y1 || 1);
+    const cx = x0 + (x1 - x0) * t, w = w0 + (w1 - w0) * t;
+    const left = cx - w;
+    for (let k = 0; k < 7; k++) {
+      const a = Math.round(left + 2 * w * k / 7), b = Math.round(left + 2 * w * (k + 1) / 7);
+      let c = dark ? RBD + k : RB + k;
+      if (checker) c = ((k + (y >> 1)) & 1) ? C_WHITE : C_BLACK;
+      if (b > a) rect(a, y, b - a, 1, c);
+    }
+    px(Math.round(left) - 1, y, C_BLACK); px(Math.round(cx + w), y, C_BLACK);
+  }
+  return top;
+}
+function drawRoadFP() {
+  const eyeWX = fl(camX) + fpEyeX;
+  let maxY = H;
+  // biên gần nhất: mặt phẳng gần
+  let nearS = NEARZ / DZS + 0.05;
+  let wxA = eyeWX + nearS;
+  project(nearS, roadHeight(fl(wxA)), 0);
+  let ax = PX, ay = PY, aw = ROADW * PS;
+  let prevGap = floorTop(fl(wxA)) === NOFLOOR;
+  let k = Math.floor(wxA / SEG) + 1;
+  for (let n = 0; n < 220; n++, k++) {
+    const wxB = k * SEG, dS = wxB - eyeWX;
+    if (!project(dS, roadHeight(wxB), 0)) continue;
+    const bx = PX, by = PY, bw = ROADW * PS;
+    const mid = fl((wxA + wxB) * 0.5);
+    const gap = floorTop(mid) === NOFLOOR;
+    if (!gap) {
+      if (prevGap) {                                  // mặt cắt đầu đoạn sau khe: 7 sọc như sàn nhìn ngang
+        const th = 14 * (FOC / ((wxA - eyeWX) * DZS));
+        const top = Math.max(0, Math.round(ay)), bot = Math.min(maxY, Math.round(ay + th));
+        for (let y = top; y < bot; y++) {
+          const k7 = clamp(fl((y - ay) / th * 7), 0, 6);
+          rect(Math.round(ax - aw), y, Math.round(2 * aw), 1, RB + k7);
+        }
+        if (top < maxY) maxY = Math.max(0, top);
+      }
+      const seg = fl(mid / SEG);
+      const dark = (seg & 15) === 0;            // vạch tối ngang đường, cách đều 16 đơn vị
+      const checker = Math.abs(mid - finishWX) < 3;
+      if (by < maxY) maxY = fillRoadRows(ay, by, ax, aw, ay, bx, bw, by, dark, checker, maxY);
+    }
+    prevGap = gap;
+    ax = bx; ay = by; aw = bw; wxA = wxB;
+    if (dS * DZS > 760 || maxY <= 0) break;
+  }
+}
+
+function drawSpeedLinesFP() {
+  const n = 4 + Math.round(clamp((spd - CRUISE) / (BOOSTV - CRUISE), 0, 1) * (NFS - 4));
+  const lenK = 0.5 + spd / 7;
+  for (let i = 0; i < n; i++) {
+    const ca = Math.cos(fsA[i]), sa = Math.sin(fsA[i]);
+    const r0 = fsR[i], r1 = r0 + fsL[i] * lenK;
+    const x0 = Math.round(W / 2 + ca * r0 * 1.2), y0 = Math.round(fpHor + sa * r0 * 0.7);
+    const x1 = Math.round(W / 2 + ca * r1 * 1.2), y1 = Math.round(fpHor + sa * r1 * 0.7);
+    line(x0, y0, x1, y1, r0 > 70 ? C_WHITE : C_DIM);
+  }
+}
+
+// ---------- Vật thể phóng to/thu nhỏ theo pixel (nearest, không khử răng cưa) ----------
+function drawMaskScaled(m, cx, fy, ps, solid, r, back) {
+  // viền 1px: đen, phía gần nguy hiểm loé trắng khi near miss
+  const flashOn = r && r.flashT > 0 && (r.flashT > 6 || (r.flashT & 1) === 0);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let j = 0; j <= MFY; j++) for (let i = 0; i < MW; i++) {
+      let v = m[j * MW + i];
+      if (v === EMPTY) continue;
+      const x0 = Math.round(cx + (i - 12) * ps), x1 = Math.max(x0 + 1, Math.round(cx + (i - 11) * ps));
+      const y0 = Math.round(fy + (j - MFY - 1) * ps), y1 = Math.max(y0 + 1, Math.round(fy + (j - MFY) * ps));
+      if (pass === 0) {
+        if (solid >= 0) continue;
+        let oc = C_BLACK;
+        if (flashOn && (j - (MFY - 5)) * r.flashDY > 0) oc = C_WHITE;
+        rect(x0 - 1, y0 - 1, x1 - x0 + 2, y1 - y0 + 2, oc);
+      } else {
+        if (solid >= 0) v = solid;
+        else if (back && v === C_BLACK) v = r.cB;        // nhìn từ phía sau: không thấy mắt
+        rect(x0, y0, x1 - x0, y1 - y0, v);
+      }
+    }
+  }
+}
+function drawRacerFP(r) {
+  const dS = (r.sx + 6) - fpEyeX;
+  if (!project(dS, FLOOR_BASE - r.y, r.lane)) return false;
+  drawMaskScaled(r.mask, PX, PY, PS, -1, r, true);
+  return true;
+}
+function drawGhostFP(g) {
+  if (!project((ghX[g] + 6) - fpEyeX, FLOOR_BASE - ghY[g], SONNET.lane)) return;
+  const a = ghAge[g];
+  drawMaskScaled(ghMask[g], PX, PY, PS, a < 8 ? RB + ghK[g] : RBD + ghK[g], null, true);
+}
+function drawMeteorFP(i) {
+  if (!project(mX[i] - fpEyeX, FLOOR_BASE - mY[i], meteorLat(i))) return;
+  const s = MET_SPR[mSize[i] * 2 + ((T >> 2) & 1)], D = s.w;
+  if (D * PS < 2) { px(Math.round(PX), Math.round(PY), C_LAVA); return; }
+  for (let j = 0; j < D; j++) for (let i2 = 0; i2 < D; i2++) {
+    const c = s.d[j * D + i2];
+    if (c === 255) continue;
+    const x0 = Math.round(PX + (i2 - D / 2) * PS), x1 = Math.max(x0 + 1, Math.round(PX + (i2 + 1 - D / 2) * PS));
+    const y0 = Math.round(PY + (j - D / 2) * PS), y1 = Math.max(y0 + 1, Math.round(PY + (j + 1 - D / 2) * PS));
+    rect(x0, y0, x1 - x0, y1 - y0, c);
+  }
+}
+function drawGateFP() {                     // cổng đích caro
+  const dS = (finishWX - camX) - fpEyeX;
+  if (dS * DZS < NEARZ || dS > 190) return;
+  const hb = roadHeight(fl(finishWX));
+  for (let side = -1; side <= 1; side += 2) {
+    for (let cy = 0; cy < 17; cy++) for (let cxi = 0; cxi < 2; cxi++) {
+      if (!project(dS, hb + cy * 2 + 2, side * (ROADW + 3) + cxi * 2 - 1)) return;
+      const s = Math.max(1, Math.round(PS * 2));
+      rect(Math.round(PX - PS), Math.round(PY - PS), s, s, ((cy + cxi) & 1) ? C_WHITE : C_BLACK);
+    }
+  }
+  for (let cxi = -14; cxi < 14; cxi++) for (let cy = 0; cy < 3; cy++) {
+    if (!project(dS, hb + 34 - cy * 2, cxi * 2 + 1)) return;
+    const s = Math.max(1, Math.round(PS * 2));
+    rect(Math.round(PX - PS), Math.round(PY - PS), s, s, ((cy + cxi) & 1) ? C_WHITE : (T & 4) ? 15 : C_BLACK);
+  }
+}
+
+// ---------- Chùm tia: từ xa phía trước lao dọc đường về phía mình ----------
+function drawBeamFP(b) {
+  const ph = bPhase[b];
+  const xEnd = Math.max(bClip[b], fpEyeX + NEARZ / DZS + 0.05);
+  if (ph === 1) {                                      // đường chớp magenta 1px báo trước
+    if (((bT[b] >> 1) & 1) === 0 && project(W - fpEyeX, FLOOR_BASE - beamY(b, W), BEAM_LAT)) {
+      const x0 = Math.round(PX), y0 = Math.round(PY);
+      const xn = Math.max(xEnd, fpEyeX + 2.5);
+      if (project(xn - fpEyeX, FLOOR_BASE - beamY(b, xn), BEAM_LAT)) line(x0, y0, Math.round(PX), Math.round(PY), C_MAG);
+    }
+    if (project(W - fpEyeX, FLOOR_BASE - beamY(b, W), BEAM_LAT)) circle(Math.round(PX), Math.round(PY), 2 + ((bT[b] >> 2) & 1), C_MAG);
+    return;
+  }
+  const hh = beamThick(b) / 2;
+  const xStop = Math.max(xEnd, bHead[b]);
+  for (let pass = 0; pass < 2; pass++) {              // lượt 1 viền xanh lam, lượt 2 lõi trắng
+    let x = W;
+    while (x >= xStop) {
+      if (project(x - fpEyeX, FLOOR_BASE - beamY(b, x), BEAM_LAT)) {
+        const hv = Math.max(0.5, hh * PS);
+        if (pass === 0) {
+          const hw = BEAM_HW * PS;
+          rect(Math.round(PX - hw), Math.round(PY - hv), Math.max(1, Math.round(2 * hw)), Math.max(1, Math.round(2 * hv)), C_CYAN);
+          if (((fl(x) * 7 + T * 5) % 13) === 0) px(Math.round(PX - hw) - 1, Math.round(PY), C_MAG);
+          if (((fl(x) * 5 + T * 3) % 17) === 0) px(Math.round(PX + hw) + 1, Math.round(PY), C_MAG);
+        } else {
+          const hw = BEAM_HW * 0.45 * PS, cv = Math.max(0.5, hv - Math.max(1, PS * 0.7));
+          rect(Math.round(PX - hw), Math.round(PY - cv), Math.max(1, Math.round(2 * hw)), Math.max(1, Math.round(2 * cv)), C_WHITE);
+        }
+      }
+      x -= Math.max(0.35, (x - fpEyeX) * 0.05);
+    }
+  }
+  if (ph === 2 && project(bHead[b] - fpEyeX, FLOOR_BASE - beamY(b, bHead[b]), BEAM_LAT)) {   // đầu chùm rung lắc
+    const wv = WOBBLE[(T + b * 5) % WOBBLE.length] * Math.max(1, PS);
+    const hw = (BEAM_HW + 1) * PS, hv = (hh + 1) * PS;
+    rect(Math.round(PX - hw), Math.round(PY - hv + wv), Math.max(2, Math.round(2 * hw)), Math.max(2, Math.round(2 * hv)), C_CYAN);
+    rect(Math.round(PX - hw + 1), Math.round(PY - hv + wv + 1), Math.max(1, Math.round(2 * hw) - 2), Math.max(1, Math.round(2 * hv) - 2), C_WHITE);
+    px(Math.round(PX - hw) - 1, Math.round(PY + WOBBLE[(T + 3) % WOBBLE.length]), C_MAG);
+    px(Math.round(PX + hw) + 1, Math.round(PY - wv), C_MAG);
+  }
+  if (project(W - fpEyeX, FLOOR_BASE - beamY(b, W), BEAM_LAT)) {     // nguồn phát ở xa
+    circle(Math.round(PX), Math.round(PY), 3, (T & 2) ? C_CYAN : C_MAG);
+    rect(Math.round(PX) - 1, Math.round(PY) - 1, 3, 3, C_WHITE);
+  }
+}
+
+function drawParticlesFP() {
+  const camXi = fl(camX);
+  for (let i = 0; i < NP; i++) {
+    if (pLife[i] <= 0 || pWorld[i] === 2) continue;
+    const r = RAMPS[pRamp[i]];
+    const c = r[fl((pMax[i] - pLife[i]) * r.length / pMax[i])];
+    const x = pWorld[i] ? pX[i] - camXi : pX[i];
+    if (!project(x - fpEyeX, FLOOR_BASE - pY[i], pL[i])) continue;
+    const s = clamp(Math.round(PS * 0.8 * pSize[i]), 1, 4);
+    rect(Math.round(PX), Math.round(PY), s, s, c);
+  }
+}
+function drawScreenParticles() {
+  for (let i = 0; i < NP; i++) {
+    if (pLife[i] <= 0 || pWorld[i] !== 2) continue;
+    const r = RAMPS[pRamp[i]];
+    const c = r[fl((pMax[i] - pLife[i]) * r.length / pMax[i])];
+    if (pSize[i] > 1) rect(fl(pX[i]), fl(pY[i]), pSize[i], pSize[i], c); else px(fl(pX[i]), fl(pY[i]), c);
+  }
+}
+function drawRingsFP() {
+  for (let i = 0; i < NRING; i++) {
+    const a = ringAge[i];
+    if (a < 0) continue;
+    const k = a % 7;
+    let x, y, r;
+    if (ringMe[i]) { x = W / 2; y = H - 8; r = 4 + a * 3; }     // vòng cầu vồng lan quanh tôi
+    else {
+      if (!project(ringX[i] - fpEyeX, FLOOR_BASE - ringY[i], SONNET.lane)) continue;
+      x = Math.round(PX); y = Math.round(PY); r = Math.max(2, Math.round((3 + a * 0.9) * PS));
+    }
+    circle(x, y, r, a < 12 ? RB + k : RBD + k);
+    if (r > 4) circle(x, y, r - 2, a < 9 ? RB + ((k + 3) % 7) : RBD + ((k + 3) % 7));
+  }
+}
+
+// ---------- Cơ thể của tôi: hai cánh tay cam ở mép dưới ----------
+function armBlock(x, y, flash, ghostC) {      // tay 2x2 pixel gốc, phóng lớn, chìa ra từ mép
+  const w = 24, h = 16;
+  if (ghostC >= 0) { rect(x, y, w, h, ghostC); return; }
+  rect(x - 1, y - 1, w + 2, h + 2, flash ? C_WHITE : C_BLACK);
+  rect(x, y, w, h, OPUS.cB);
+  rect(x, y, w, 4, OPUS.cH); rect(x, y, 2, h, OPUS.cH);                // sáng trên/trái
+  rect(x, y + h - 4, w, 4, OPUS.cS); rect(x + w - 3, y + 4, 3, h - 4, OPUS.cS);   // bóng dưới/phải
+}
+function armY(side) {
+  const r = OPUS;
+  let y = H - 13 + r.qArm * 5;
+  if (r.qSlide) y -= 9;                       // trượt: ngả người, tay giơ lên
+  if (!r.grounded && r.hover > 0) y -= 4;
+  if (r.grounded && r.slideT === 0 && r.preJ === 0) y += (r.legF === (side < 0 ? 0 : 2)) ? -2 : (r.legF === (side < 0 ? 2 : 0)) ? 1 : 0;
+  return y;
+}
+function drawMyBodyFP() {
+  const lx = -8 - Math.round(fpSideV * 2), rx = W - 16 - Math.round(fpSideV * 2);
+  // bóng tàn cầu vồng của tay khi né nhanh
+  for (let g = 0; g < NGH; g++) {
+    if (ghAge[g] < 0 || !ghMe[g]) continue;
+    const a = ghAge[g], c = a < 8 ? RB + ghK[g] : RBD + ghK[g];
+    if (a >= 14 && (a & 1)) continue;
+    armBlock(lx - a * 2, H - 12 + a * 2, false, c);
+    armBlock(rx + a * 2, H - 12 + a * 2, false, c);
+  }
+  const fl0 = OPUS.flashT > 0 && (OPUS.flashT > 6 || (OPUS.flashT & 1) === 0);
+  armBlock(lx, armY(-1), fl0 && nmSideLat <= 0, -1);
+  armBlock(rx, armY(1), fl0 && nmSideLat >= 0, -1);
+  if (fl0) {                                  // viền màn hình loé trắng phía gần nguy hiểm
+    if (nmSideLat > 0) rect(W - 1, 0, 1, H, C_WHITE);
+    if (nmSideLat < 0) rect(0, 0, 1, H, C_WHITE);
+    if (nmSideDY < 0) rect(0, 0, W, 1, C_WHITE);
+    if (nmSideDY > 0) rect(0, H - 1, W, 1, C_WHITE);
+  }
+}
+
+// ---------- Gương chiếu hậu: Sonnet khi ở sau lưng tôi ----------
+function drawMirror(dS) {
+  const x0 = 3, y0 = 12, w = 44, h = 12;
+  rect(x0 - 1, y0 - 1, w + 2, h + 2, C_BLACK);
+  rect(x0, y0, w, h, 2);
+  for (let k = 0; k < 7; k++) rect(x0 + 6 + k * 4, y0 + h - 3, 4, 3, RB + 6 - k);   // đường phía sau (lật gương)
+  const ps = clamp(5 / (4 - dS * 0.35), 0.35, 0.9);
+  drawMaskScaled(SONNET.mask, x0 + w / 2 - 4, y0 + h - 2 - (SONNET.grounded ? 0 : 3), ps, -1, SONNET, false);
+  rect(x0 - 1, y0 - 1, w + 2, 1, C_DIM);
+  text(SONNET.name, x0, y0 + h + 3, SONNET.cH, C_BLACK);
+}
+
+// ---------- Sắp xếp vật thể theo độ sâu (mảng cấp sẵn) ----------
+const NOD = 24;
+const odZ = new Float32Array(NOD), odT = new Uint8Array(NOD), odI = new Uint8Array(NOD);
+let nOd = 0;
+function addOd(z, t, i) {
+  if (nOd >= NOD) return;
+  let j = nOd++;
+  while (j > 0 && odZ[j - 1] < z) { odZ[j] = odZ[j - 1]; odT[j] = odT[j - 1]; odI[j] = odI[j - 1]; j--; }
+  odZ[j] = z; odT[j] = t; odI[j] = i;
+}
+
+function drawHUDFP(sonnetBehind, sdS) {
+  const first = T >= T_FINISH || OPUS.sx >= SONNET.sx;
+  text('ME', 3, 3, OPUS.cH, C_BLACK);
+  text(first ? '1ST' : '2ND', 13, 3, first ? C_YEL : C_WHITE, C_BLACK, first && ((rt >> 3) & 1) ? (rt >> 2) % 7 : -1);
+  // tên của tôi "trên đầu" = mép trên tầm nhìn
+  text(OPUS.name, (W - OPUS.lw) >> 1, 2, OPUS.cH, C_BLACK);
+  px(W >> 1, 8, OPUS.cH); px((W >> 1) - 1, 8, C_BLACK); px((W >> 1) + 1, 8, C_BLACK); px(W >> 1, 9, C_BLACK);
+  const lit = Math.round(clamp((spd - 2.6) / (BOOSTV - 2.6), 0, 1) * 7);
+  for (let i = 0; i < 7; i++) {
+    const hh = 2 + i;
+    rect(127 + i * 4 - 1, 10 - hh - 1, 5, hh + 2, C_BLACK);
+    rect(127 + i * 4, 10 - hh, 3, hh, i < lit ? RB + i : 2);
+  }
+  if (warnMarkT > 0 && (warnMarkT & 4)) {
+    text('!', 152, 14, C_MAG, C_BLACK);
+    px(150, 22, C_MAG); px(151, 21, C_MAG); px(152, 20, C_MAG);
+  }
+  if (sonnetBehind) drawMirror(sdS);
+  // thanh tiến trình cuộc đua (giữa hai tay)
+  const x0 = 46, len = 64, p = clamp(T / T_FINISH, 0, 1);
+  rect(x0 - 1, 85, len + 7, 3, C_BLACK);
+  rect(x0, 86, len + 1, 1, 5);
+  for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) px(x0 + len + 2 + i, 85 + j, ((i + j) & 1) ? C_WHITE : C_BLACK);
+  const po = x0 + Math.round(p * len);
+  const ps = clamp(po + Math.round((SONNET.sx - OPUS.sx) * 0.3), x0, x0 + len + 3);
+  rect(ps - 2, 83, 5, 5, C_BLACK); rect(ps - 1, 84, 3, 3, SONNET.cB);
+  rect(po - 2, 83, 5, 5, C_BLACK); rect(po - 1, 84, 3, 3, OPUS.cB); px(po, 84, OPUS.cH);
+}
+
+function glyphs2(s, x, y, c, rainbowT) {
+  let cx = x;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i), col = rainbowT >= 0 ? RB + ((i + rainbowT) % 7) : c;
+    for (let r = 0; r < 5; r++) {
+      const bits = GLYPH[code * 5 + r];
+      for (let k = 0; k < 3; k++) if (bits & (4 >> k)) rect(cx + k * 2, y + r * 2, 2, 2, col);
+    }
+    cx += (GLYPH_W[code] + 1) * 2;
+  }
+}
+function bigText(s, cy, c, rainbowT) {
+  const w = textWidth(s) * 2, x = (W - w) >> 1;
+  for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) if (ox || oy) glyphs2(s, x + ox, cy + oy, C_BLACK, -1);
+  glyphs2(s, x, cy, c, rainbowT);
+}
+
+function render() {
+  fpEyeX = OPUS.sx + 9 + lead * 0.5;
+  fpCurve = curveK(camX);
+  drawSkyFP();
+  drawRoadFP();
+  drawSpeedLinesFP();
+  drawParticlesFP();
+  for (let b = 0; b < NBEAM; b++) if (bPhase[b]) drawBeamFP(b);
+  // vật thể xa → gần
+  nOd = 0;
+  const sdS = (SONNET.sx + 6) - fpEyeX;
+  addOd(sdS, 0, 0);
+  for (let g = 0; g < NGH; g++) if (ghAge[g] >= 0 && !ghMe[g]) addOd(ghX[g] + 6 - fpEyeX, 1, g);
+  for (let i = 0; i < NMET; i++) if (mOn[i]) addOd(mX[i] - fpEyeX, 2, i);
+  addOd(finishWX - camX - fpEyeX, 3, 0);
+  let sonnetShown = false;
+  for (let n = 0; n < nOd; n++) {
+    const t = odT[n], i = odI[n];
+    if (t === 0) sonnetShown = drawRacerFP(SONNET);
+    else if (t === 1) drawGhostFP(i);
+    else if (t === 2) drawMeteorFP(i);
+    else drawGateFP();
+  }
+  if (sonnetShown && project(sdS, FLOOR_BASE - SONNET.y, SONNET.lane)) {   // tên trên đầu Sonnet
+    const headY = PY + (SONNET.my0 - MFY - 1) * PS;
+    const x = clamp(Math.round(PX) - (SONNET.lw >> 1), 1, W - SONNET.lw - 1);
+    const y = clamp(Math.round(headY) - 9, 12, H - 20);
+    text(SONNET.name, x, y, SONNET.cH, C_BLACK);
+    if (headY - y > 9) px(clamp(Math.round(PX), 1, W - 2), y + 7, SONNET.cH);
+  }
+  drawRingsFP();
+  drawMyBodyFP();
+  drawScreenParticles();
+
+  if (popT > 0) {
+    const s = 'NEAR MISS!', w = textWidth(s);
+    text(s, (W - w) >> 1, 54 - ((46 - popT) >> 3), (popT >> 1) & 1 ? C_WHITE : C_YEL, C_BLACK);
+  }
+  if (bannerT > 0) {
+    const s = TXT[bannerId];
+    if (bannerId === 3) bigText(s, 32, C_WHITE, (rt >> 2) % 7);
+    else if (bannerId !== 1 || (bannerT & 8)) bigText(s, 32, bannerId === 2 ? C_WHITE : C_YEL, -1);
+  }
+  if (T >= T_FINISH + 30 && T < T_WARP + 18) {
+    const s = 'GG SONNET!', w = textWidth(s);
+    text(s, (W - w) >> 1, 76, C_WHITE, C_BLACK);
+  }
+  drawHUDFP(!sonnetShown && sdS < 6, sdS);
+
+  if (T >= T_WARP + 22 && T < T_WARP + 28) rect(0, 0, W, H, C_WHITE);
+  else if (T >= T_WARP + 28 || T < 20) {
+    const th = T >= T_WARP ? 0 : T / 20;
+    for (let y = 0; y < H; y++) {
+      const c = RB + (fl((y + rt * 2) / 13) % 7);
+      for (let x = 0; x < W; x++) if (bayer(x, y) >= th) FB[y * W + x] = PAL[c];
+    }
+  }
+  octx.putImageData(IMG, 0, 0);
+  const shOn = shakeT > 0;
+  const shX = shOn ? (shakeAmp > 1 ? SHAKE_X[rt & 15] : Math.sign(SHAKE_X[rt & 15])) : 0;
+  const shY = shOn ? (shakeAmp > 1 ? SHAKE_Y[rt & 15] : Math.sign(SHAKE_Y[rt & 15])) : 0;
+  present(shX, shY);
+}
+
+// ---------- Phóng nguyên lần, căn giữa, viền đen ----------
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.max(1, Math.round(window.innerWidth * dpr)), ch = Math.max(1, Math.round(window.innerHeight * dpr));
+  screenCv.width = cw; screenCv.height = ch;
+  scale = Math.max(1, Math.floor(Math.min(cw / W, ch / H)));
+  offX = (cw - W * scale) >> 1; offY = (ch - H * scale) >> 1;
+  sctx.imageSmoothingEnabled = false;
+}
+function present(shX, shY) {     // rung camera = dịch nguyên khung theo pixel logic
+  sctx.fillStyle = '#000';
+  sctx.fillRect(0, 0, screenCv.width, screenCv.height);
+  sctx.drawImage(off, 0, 0, W, H, offX + shX * scale, offY + shY * scale, W * scale, H * scale);
+}
+
+// ---------- Vòng lặp: bước cố định 60Hz, vẽ bằng rAF ----------
+let lastT = -1, acc = 0;
+function frame(now) {
+  if (lastT < 0) lastT = now;
+  let dt = now - lastT;
+  lastT = now;
+  if (dt > 200) dt = 200;
+  acc += dt;
+  let n = 0;
+  while (acc >= STEP_MS && n < 8) { tick(); acc -= STEP_MS; n++; }
+  if (n === 8) acc = 0;
+  render();
+  requestAnimationFrame(frame);
+}
+resize();
+window.addEventListener('resize', resize);
+loopReset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

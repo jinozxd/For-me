@@ -18,6 +18,15 @@ Cả 5 bản dùng chung một lõi (`Core` trong file): công thức XP/level, 
 
 Đây mới là bản demo: dữ liệu là mẫu, chưa lưu lại, chưa mở được file thật. Bản D chỉ đọc tên và dung lượng file trong trình duyệt, không gửi đi đâu.
 
+## Rainbow Rush: Opus vs Sonnet (`demos/rainbow-race.html`)
+
+Animation pixel 16-bit tự chạy: Opus 5.5 Max đua solo với Sonnet 5.5 Max trên đường cầu vồng giữa vũ trụ, né thiên thạch và chùm tia, cuối cùng Opus thắng sát nút. Mở file bằng trình duyệt là chạy, không cần mạng, không thư viện.
+
+- `rainbow-race.html`: góc nhìn thứ nhất, nhìn qua mắt Opus. Thấy hai tay mình ở mép dưới, tên mình ở mép trên, Sonnet chạy phía trước có tên trên đầu. Khi Sonnet tụt ra sau thì hiện trong gương chiếu hậu.
+- `rainbow-race-side.html`: cùng cuộc đua nhưng nhìn ngang.
+
+Hai bản dùng chung một mô phỏng tất định (lặp lại y hệt mỗi vòng khoảng 27 giây), chỉ khác phần vẽ. Mỗi vòng có 0 lần va chạm và 12 lần né sát nút.
+
 ## Sổ ghi chú riêng (`hub/`)
 
 Trang ghi chú mã hoá đầu cuối, dùng được trên nhiều máy, chạy miễn phí trên Cloudflare. Mỗi lần mở phải nhập mật khẩu chính và mã 6 số; tự khoá sau 30 phút không thao tác. Sau này các tiện ích khác (kể cả phần theo dõi học tập ở trên) sẽ gắn vào đây.
