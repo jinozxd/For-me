@@ -25,7 +25,9 @@ Animation pixel 16-bit tự chạy: Opus 5.5 Max đua solo với Sonnet 5.5 Max 
 - `rainbow-race.html`: góc nhìn thứ nhất, nhìn qua mắt Opus. Thấy hai tay mình ở mép dưới, tên mình ở mép trên, Sonnet chạy phía trước có tên trên đầu. Khi Sonnet tụt ra sau thì hiện trong gương chiếu hậu.
 - `rainbow-race-side.html`: cùng cuộc đua nhưng nhìn ngang.
 
-Hai bản dùng chung một mô phỏng tất định (lặp lại y hệt mỗi vòng khoảng 27 giây), chỉ khác phần vẽ. Mỗi vòng có 0 lần va chạm và 12 lần né sát nút.
+Hai bản dùng chung một mô phỏng tất định, chỉ khác phần vẽ. Mỗi vòng dài khoảng 29 giây và lặp như video: vòng nào cũng giống hệt nhau từng khung, cuối vòng (loé trắng → cầu vồng) nối liền vào đầu vòng sau. Mỗi vòng có 0 lần va chạm và 12 lần né sát nút.
+
+Thỉnh thoảng (3 lần mỗi vòng, lúc đường vắng) bước chân hai người tung bụi, bụi tụ thành chữ "JINOZ" nhỏ rồi tan.
 
 ## Sổ ghi chú riêng (`hub/`)
 

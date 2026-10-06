@@ -143,7 +143,7 @@ function rnd() {
 const GLYPH_SRC = {
   A: '010101111101101', B: '110101110101110', C: '011100100100011', D: '110101101101110',
   E: '111100110100111', F: '111100110100100', G: '011100101101011', H: '101101111101101',
-  I: '111010010010111', K: '101101110101101', L: '100100100100111', M: '101111111101101',
+  I: '111010010010111', J: '001001001101010', K: '101101110101101', L: '100100100100111', M: '101111111101101',
   N: '110101101101101', O: '010101101101010', P: '110101110100100', R: '110101110101101',
   S: '011100010001110', T: '111010010010010', U: '101101101101111', V: '101101101101010',
   W: '101101111111101', X: '101101010101101', Y: '101101010010010', Z: '111001010100111',
@@ -373,6 +373,7 @@ const R_SPARK = RAMPS.push(new Uint8Array([7, 17, 17, 16, 32, 22, 29])) - 1;
 const R_TAIL = RAMPS.push(new Uint8Array([7, 17, 32, 16, 15, 22, 29, 4])) - 1;
 const R_DEBRIS = RAMPS.push(new Uint8Array([31, 31, 30, 30, 29, 29])) - 1;
 const R_BEAM = RAMPS.push(new Uint8Array([7, 19, 19, 33, 26, 28])) - 1;
+const R_DUST = RAMPS.push(new Uint8Array([7, 8, 8, 8, 5, 3])) - 1;   // bụi bước chân
 const R_RAIN = RAMPS.length;      // tia lửa cầu vồng: trắng → màu → tối
 for (let k = 0; k < 7; k++) RAMPS.push(new Uint8Array([7, RB + k, RB + k, RBD + k, RBD + k]));
 const R_DROP = RAMPS.length;      // hạt sáng rơi từ sàn: màu → tối → tím tối
@@ -408,7 +409,7 @@ function drawParticles(camXi, camYi, shX, shY) {
     if (pSize[i] > 1) rect(x, y, pSize[i], pSize[i], c); else px(x, y, c);
   }
 }
-function clearParticles() { for (let i = 0; i < NP; i++) pLife[i] = 0; }
+function clearParticles() { for (let i = 0; i < NP; i++) pLife[i] = 0; pNext = 0; }
 
 // Tia lửa cầu vồng bung ra (tiếp đất, trượt, dash)
 function rainbowBurst(world, x, y, n, spread, upward) {
@@ -485,7 +486,9 @@ const RACERS = [SONNET, OPUS]; // vẽ Sonnet trước, tôi ở lớp trên
 function resetRacer(r, base) {
   r.sx = base; r.dashOff = 0; r.dashT = 0; r.airDash = false;
   r.vy = 0; r.grounded = true; r.jumps = 0; r.preJ = 0; r.takeT = 0; r.landT = 0; r.hover = 0; r.slideT = 0;
-  r.nSch = 0; r.flashT = 0; r.lookAhead = 0; r.ghostLeft = 0; r.forceQ = true;
+  r.nSch = 0; r.flashT = 0; r.lookAhead = 0; r.ghostLeft = 0; r.ghostIdx = 0; r.ghostTimer = 0; r.forceQ = true;
+  // xoá cả trạng thái hoạt hình để mỗi vòng giống hệt nhau từng khung
+  r.legAcc = 0; r.legF = 0; r.pLean = 0; r.pSX = 0; r.pSY = 0; r.pArm = 0; r.pEye = 0; r.labelLift = 0;
   r.wx = camX + base + 6;
   const ft = floorTop(r.wx);
   r.y = ft === NOFLOOR ? FLOOR_BASE : ft;
@@ -1136,7 +1139,7 @@ function drawBeams(camYi, shX, shY) {
 // =====================================================================
 //  Kịch bản tấn công tất định (lặp lại y hệt mỗi vòng)
 // =====================================================================
-const EV_WARN = 1, EV_MET = 2, EV_BEAM = 3, EV_ACT = 4, EV_STATE = 5, EV_TEXT = 6;
+const EV_WARN = 1, EV_MET = 2, EV_BEAM = 3, EV_ACT = 4, EV_STATE = 5, EV_TEXT = 6, EV_DUST = 7;
 const ME = 0, RIVAL = 1, SMALL = 0, MED = 1, BIG = 2;
 const TXT = ['GO!', 'BOOST!', 'FINISH!', 'OPUS 5.5 MAX WINS!'];
 const EV_ROWS = [
@@ -1175,7 +1178,11 @@ const EV_ROWS = [
   [T_FINISH, EV_TEXT, 2, 26],
   [T_FINISH + 26, EV_TEXT, 3, 74],
   [1530, EV_ACT, ME, A_JUMP, 0],
-  [T_WARP, EV_STATE, ST_WARP]
+  [T_WARP, EV_STATE, ST_WARP],
+  // thỉnh thoảng bụi bước chân tụ thành chữ JINOZ (3 lần mỗi vòng, lúc đường vắng)
+  [448, EV_DUST, RIVAL],
+  [728, EV_DUST, ME],
+  [1242, EV_DUST, RIVAL]
 ];
 EV_ROWS.sort(function (a, b) { return a[0] - b[0]; });
 const NEV = EV_ROWS.length, EVS = 10;
@@ -1214,6 +1221,8 @@ function fireEvent(o) {
     setState(a);
   } else if (ty === EV_TEXT) {
     bannerId = a; bannerT = b; bannerMax = b;
+  } else if (ty === EV_DUST) {
+    startDust(a);
   }
 }
 function runDirector() {
@@ -1245,6 +1254,8 @@ OPUS.lw = textWidth(OPUS.name); SONNET.lw = textWidth(SONNET.name);
 
 function loopReset() {
   T = 0; camX = 0; spd = speedAt(0); rseed(20261006);
+  // mọi trạng thái về đúng như lúc mở trang → vòng lặp như video, khung nào cũng y hệt
+  lf = 0; lead = 0; camY = 0; shakeT = 0; shakeAmp = 0; popT = 0; dustT = -1;
   evIdx = 0; bannerT = 0; warnMarkT = 0; hitStop = 0; slowMo = 0;
   for (let i = 0; i < NMET; i++) mOn[i] = 0;
   for (let b = 0; b < NBEAM; b++) bPhase[b] = 0;
@@ -1289,6 +1300,7 @@ function worldStep() {
     pLatBase = (n & 1) ? -ROADW - 1 : ROADW + 1; pLatJit = 3; pLatV = (n & 1) ? -0.05 : 0.05;
     spawnP(R_DROP + fl(rnd() * 7), 1, wx, ft + 13 + rnd() * 2, -0.1 - rnd() * 0.3, 0.2 + rnd() * 0.5, 0.01, 30 + fl(rnd() * 40), 1);
   }
+  updateDust();
   updateLabels();
   updateState();
   if (warnMarkT > 0) warnMarkT--;
@@ -1298,14 +1310,101 @@ function worldStep() {
   if (T >= LOOP) loopReset();
 }
 
-let rt = 0;   // bộ đếm thời gian thực (60Hz), chạy cả khi hit stop
+let rt = 0, lf = 0;   // khung thực (60Hz, chạy cả khi hit stop); lf đếm lại từ 0 mỗi vòng
 function tick() {
-  rt++;
+  rt++; lf++;
   if (shakeT > 0) shakeT--; else shakeAmp = 0;
   if (popT > 0) popT--;
   if (hitStop > 0) { hitStop--; return; }               // hit stop: đứng hình toàn bộ
   if (slowMo > 0) { slowMo--; if (slowMo & 1) return; } // slow motion: thưa bước cập nhật
   worldStep();
+}
+
+// =====================================================================
+//  Bụi bước chân thỉnh thoảng tụ thành chữ "JINOZ" nhỏ rồi tan
+// =====================================================================
+const DUST_G = 20, DUST_H = 34, DUST_F = 22, DUST_LEN = DUST_G + DUST_H + DUST_F;   // tụ · giữ · tan
+const DMAX = 64;
+const dTX = new Int8Array(DMAX), dTY = new Int8Array(DMAX), dRX = new Float32Array(DMAX), dRY = new Float32Array(DMAX);
+const dVX = new Float32Array(DMAX), dVY = new Float32Array(DMAX), dDel = new Uint8Array(DMAX), dPh = new Float32Array(DMAX);
+let dN = 0, dustT = -1, dustOwner = 0, dustRX = 0, dustRY = 0, dustDrift = 0, DX = 0, DY = 0;
+(function buildDust() {
+  const s = 'JINOZ', w = textWidth(s);
+  rseed(5150);
+  let cx = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    for (let r = 0; r < 5; r++) for (let c = 0; c < 3; c++) {
+      if (!(GLYPH[code * 5 + r] & (4 >> c)) || dN >= DMAX) continue;
+      dTX[dN] = cx + c - (w >> 1); dTY[dN] = r - 5;
+      dRX[dN] = rnd() * 2 - 1; dRY[dN] = rnd() * 2 - 1;
+      dVX[dN] = -0.12 - rnd() * 0.3; dVY[dN] = -0.08 - rnd() * 0.18;
+      dDel[dN] = fl(rnd() * 8); dPh[dN] = rnd() * 6.28;
+      dN++;
+    }
+    cx += GLYPH_W[code] + 1;
+  }
+})();
+function startDust(k) {
+  if (!FP) k = OPUS.sx <= SONNET.sx ? ME : RIVAL;   // nhìn ngang: chữ hiện sau lưng người đang bám đuổi (chỗ trống)
+  const r = racerOf(k);
+  dustT = 0; dustOwner = k; dustRX = r.sx + 6; dustRY = r.y; dustDrift = 0;
+}
+function stepPuff(r) {                 // một bước chân tung bụi
+  if (!r.grounded || r.slideT > 0) return;
+  if (FP && r.me) {
+    pLatBase = 0; pLatJit = 0; pLatV = 0;
+    for (let n = 0; n < 5; n++) {
+      const side = (n & 1) ? 1 : -1;
+      spawnP(R_DUST, 2, W / 2 + side * (14 + rnd() * 30), H - 2, side * (0.2 + rnd() * 0.5), -0.3 - rnd() * 0.8, 0, 18 + fl(rnd() * 12), rnd() < 0.3 ? 2 : 1);
+    }
+    return;
+  }
+  pLatBase = r.lane; pLatJit = 10; pLatV = 0;
+  for (let n = 0; n < 5; n++) {
+    spawnP(R_DUST, 0, r.sx + 2 + rnd() * 8, r.y - 1, -0.3 - rnd() * 0.6, -0.15 - rnd() * 0.5, 0.005, 18 + fl(rnd() * 12), rnd() < 0.3 ? 2 : 1);
+  }
+}
+function updateDust() {
+  if (dustT < 0) return;
+  if (dustT < 14 && (dustT & 3) === 0) { stepPuff(OPUS); stepPuff(SONNET); }   // cả hai cùng tung bụi
+  dustDrift += 0.25;
+  if (++dustT >= DUST_LEN) dustT = -1;
+}
+// Vị trí hạt chữ thứ p (tương đối với chân chữ), bay ra từ đám bụi (sx, sy) ± (spx, spy)
+function dustPos(p, sx, sy, spx, spy) {
+  const t = dustT;
+  if (t < DUST_G) {
+    if (t < dDel[p]) return false;
+    const u = clamp((t - dDel[p]) / (DUST_G - 8), 0, 1), e = 1 - (1 - u) * (1 - u) * (1 - u);
+    const x0 = sx + dRX[p] * spx, y0 = sy + dRY[p] * spy;
+    DX = x0 + (dTX[p] - x0) * e + (1 - e) * 3 * Math.sin(t * 0.45 + dPh[p]);
+    DY = y0 + (dTY[p] - y0) * e + (1 - e) * 1.5 * Math.cos(t * 0.4 + dPh[p]);
+    return true;
+  }
+  if (t < DUST_G + DUST_H) { DX = dTX[p]; DY = dTY[p]; return true; }
+  const s = t - DUST_G - DUST_H;
+  if ((p * 7) % DUST_F < s - 4) return false;          // tan dần từng hạt
+  DX = dTX[p] + dVX[p] * s * 1.6; DY = dTY[p] + dVY[p] * s * 1.6;
+  return true;
+}
+function dustColor(p) {
+  const t = dustT;
+  if (t < DUST_G) return C_DIM;
+  if (t < DUST_G + DUST_H) return (p * 5 + t) % 19 === 0 ? C_WHITE : C_DIM;
+  const s = t - DUST_G - DUST_H;
+  return s < 8 ? C_DIM : s < 15 ? 5 : 3;
+}
+function dustSettled() { return dustT >= DUST_G - 2 && dustT < DUST_G + DUST_H + 6; }
+// Vẽ chữ bụi ở toạ độ màn hình: (ax, ay) = chân chữ, mỗi hạt k×k px (k nguyên)
+function drawDustAt(ax, ay, sx, sy, spx, spy, k) {
+  for (let pass = dustSettled() ? 0 : 1; pass < 2; pass++) {
+    for (let p = 0; p < dN; p++) {
+      if (!dustPos(p, sx, sy, spx, spy)) continue;
+      const x = Math.round(ax + DX * k), y = Math.round(ay + DY * k);
+      if (pass === 0) rect(x - 1, y - 1, k + 2, k + 2, C_BLACK); else rect(x, y, k, k, dustColor(p));
+    }
+  }
 }
 
 // =====================================================================
@@ -1416,7 +1515,7 @@ function drawHUD() {
   // góc nhìn của tôi: vị trí hiện tại
   const first = T >= T_FINISH || OPUS.sx >= SONNET.sx;
   text('ME', 3, 3, OPUS.cH, C_BLACK);
-  text(first ? '1ST' : '2ND', 13, 3, first ? C_YEL : C_WHITE, C_BLACK, first && ((rt >> 3) & 1) ? (rt >> 2) % 7 : -1);
+  text(first ? '1ST' : '2ND', 13, 3, first ? C_YEL : C_WHITE, C_BLACK, first && ((lf >> 3) & 1) ? (lf >> 2) % 7 : -1);
   // thanh tiến trình cuộc đua
   const x0 = 46, len = 64, p = clamp(T / T_FINISH, 0, 1);
   rect(x0, 5, len + 1, 1, 5);
@@ -1442,8 +1541,8 @@ function drawHUD() {
 
 function render() {
   const shOn = shakeT > 0;
-  const shX = shOn ? (shakeAmp > 1 ? SHAKE_X[rt & 15] : Math.sign(SHAKE_X[rt & 15])) : 0;
-  const shY = shOn ? (shakeAmp > 1 ? SHAKE_Y[rt & 15] : Math.sign(SHAKE_Y[rt & 15])) : 0;
+  const shX = shOn ? (shakeAmp > 1 ? SHAKE_X[lf & 15] : Math.sign(SHAKE_X[lf & 15])) : 0;
+  const shY = shOn ? (shakeAmp > 1 ? SHAKE_Y[lf & 15] : Math.sign(SHAKE_Y[lf & 15])) : 0;
   const camXi = fl(camX), camYi = Math.round(camY);
 
   drawSky(camYi);
@@ -1456,6 +1555,7 @@ function render() {
   for (let i = 0; i < RACERS.length; i++) drawRacer(RACERS[i], camYi, shX, shY);
   drawParticlesPass(camXi, camYi, shX, shY, false);  // tia lửa, mảnh vỡ
   drawRings(camYi, shX, shY);
+  if (dustT >= 0) drawDustAt(dustRX - 22 - dustDrift + shX, dustRY - 6 - camYi + shY, 22, 6, 6, 1, 1);   // chữ bụi sau lưng
   drawBeams(camYi, shX, shY);
 
   if (popT > 0) {
@@ -1465,7 +1565,7 @@ function render() {
   }
   if (bannerT > 0) {
     const s = TXT[bannerId];
-    if (bannerId === 3) bigText(s, 13, C_WHITE, (rt >> 2) % 7);
+    if (bannerId === 3) bigText(s, 13, C_WHITE, (lf >> 2) % 7);
     else if (bannerId !== 1 || (bannerT & 8)) bigText(s, 22, bannerId === 2 ? C_WHITE : C_YEL, -1);
   }
   if (T >= T_FINISH + 30 && T < T_WARP + 18) {
@@ -1478,8 +1578,9 @@ function render() {
   if (T >= T_WARP + 22 && T < T_WARP + 28) rect(0, 0, W, H, C_WHITE);
   else if (T >= T_WARP + 28 || T < 20) {
     const th = T >= T_WARP ? 0 : T / 20;
+    const wc = T >= T_WARP ? T - T_WARP : T + LOOP - T_WARP;
     for (let y = 0; y < H; y++) {
-      const c = RB + (fl((y + rt * 2) / 13) % 7);
+      const c = RB + (fl((y + wc * 2) / 13) % 7);   // pha dải liền mạch qua chỗ nối vòng
       for (let x = 0; x < W; x++) if (bayer(x, y) >= th) FB[y * W + x] = PAL[c];
     }
   }
